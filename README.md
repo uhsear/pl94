@@ -54,9 +54,10 @@ PASS  the two 2010 geoheader records reassemble to the exact bytes of the publis
 PASS  a real 2010 county record reads SUMLEV 050, LOGRECNO 0046955, STATE 56 and COUNTY 021 at Figure 2-4's positions
 PASS  AREALAND and AREAWATR come out of their space-padded 14 character fields as the published square metres  <-- pinned defect
 PASS  a real 2010 SUMLEV 610 senate district 21 composes the SAME GEOID 56021 as the county, the 2010 twin of the DC case  <-- pinned defect
+PASS  all sixteen 2010 GEOID rules compose the concatenation the construction note prints, out of full-width fields at the published positions  <-- pinned defect
 PASS  the real 2010 segment 2 record carries H1 40462 = 37576 occupied + 2886 vacant at the same three positions
-PASS  a SUMLEV 620 legislative district numbered 083 has GEOCODE 12083, passes the prefix test and is NOT in county 083  <-- pinned defect
-PASS  a SUMLEV 155 record IS in county 083 even though its GEOCODE is state + place + county and fails the prefix test  <-- pinned defect
+PASS  a SUMLEV 620 legislative district numbered 045 has GEOCODE 99045, passes the prefix test and is NOT in county 045  <-- pinned defect
+PASS  a SUMLEV 155 record IS in county 045 even though its GEOCODE is state + place + county and fails the prefix test  <-- pinned defect
 PASS  three blocks of 10, 12 and 8 reconcile to a county record of 30
 PASS  the same records filtered on the prefix alone sum to 127 for a county of 30  <-- pinned defect
 PASS  a file with no SUMLEV 050 row for the county is REFUSED, not reported against nothing  <-- pinned defect
@@ -68,26 +69,30 @@ PASS  and is REFUSED on housing alone, 13 against 12  <-- pinned defect
 PASS  an extra block of 0 people and 0 housing units leaves P1 and H1 both reconciled
 PASS  and is REFUSED on AREALAND, 3500 square metres against 3000  <-- pinned defect
 PASS  a 2010 SUMLEV 155 extract is REFUSED, because no GEOID rule exists for it, rather than written under an empty key  <-- pinned defect
+PASS  a county in Arabic-Indic digits is refused, although str.isdigit() accepts it  <-- pinned defect
 ...
 PASS  --apply does NOT write an extract that failed to reconcile  <-- pinned defect
 PASS  a zip with no segment 2 file exits 2, rather than reconciling population and skipping housing  <-- pinned defect
 PASS  a 2010 zip reconciles through the command line with --year 2010
 PASS  the same zip without --year exits 2 and names the 2010 members it does hold, so the fix is obvious  <-- pinned defect
+PASS  a geoheader member whose deflate stream is damaged exits 2 with one line, not a traceback that exits 1  <-- pinned defect
+PASS  an encrypted member exits 2 and says it is encrypted  <-- pinned defect
+PASS  --out naming the --pl zip itself is a usage error, and the zip is left byte for byte as it was  <-- pinned defect
 PASS  --ap is refused by argparse with exit 2 and writes nothing, rather than being read as --apply  <-- pinned defect
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 --------------------------------------------------------------------
-241 assertions, 0 failed
+260 assertions, 0 failed
 ```
 
-The same 241 assertions pass on Windows with Python 3.13, and on Ubuntu with Python 3.12 and
-Python 3.9. Branch coverage of `pl94.py` under `--self-test` is 100 percent.
+The same 260 assertions pass on Windows with Python 3.13, 3.12 and 3.9, and on Ubuntu with Python
+3.12 and 3.9. Branch coverage of `pl94.py` under `--self-test` is 100 percent.
 
 ## Requirements
 
-Python 3.9 or newer. Standard library only: `argparse`, `collections`, `csv`, `os`, `sys` and
-`zipfile`, plus `contextlib`, `hashlib`, `io`, `shutil` and `tempfile` inside the self-test. It runs
-on ArcGIS Pro's Python and on a plain `python3`. `arcpy` is not used and the `arcgis` package is
-not needed.
+Python 3.9 or newer. Standard library only: `argparse`, `collections`, `csv`, `os`, `sys`,
+`zipfile` and `zlib`, plus `atexit`, `contextlib`, `hashlib`, `io`, `shutil` and `tempfile`
+inside the self-test. It runs on ArcGIS Pro's Python and on a plain `python3`. `arcpy` is not
+used and the `arcgis` package is not needed.
 
 ```
 git clone https://github.com/uhsear/pl94.git
@@ -138,12 +143,12 @@ in plain sight.
 
 ## What it checks
 
-1. **Which records are in the county.** The geoheader's own `COUNTY` field: position 14 of the
-   2020 record, characters 30 to 32 of the 2010 one. A record that belongs to a county carries
-   its FIPS there; one that does not leaves it empty. No summary level list to keep up to date,
-   and no guessing at where a county sits inside a key whose layout changes per level. In 2020,
-   `STATENS`, an eight digit permanent identifier, sits at 13, so "STATE plus one" reads the wrong
-   field.
+1. **Which records are in the county.** The geoheader's own `COUNTY` field: the 15th field of
+   the 2020 record (0-based index 14), and characters 30 to 32 of the 2010 one. A record that
+   belongs to a county carries its FIPS there; one that does not leaves it empty. No summary
+   level list to keep up to date, and no guessing at where a county sits inside a key whose
+   layout changes per level. In 2020, `STATENS`, an eight digit permanent identifier, is the 14th
+   field (0-based index 13), so "STATE plus one" reads the wrong field.
 2. **The control record.** The single SUMLEV 050 record for that county, read out of the same zip.
    No control record, two of them, or one with no segment 1 or segment 2 row: refused. A published
    figure is never compiled into this tool.
@@ -162,7 +167,9 @@ in plain sight.
 6. **The zip's members.** Exactly one geoheader, one segment 1 and one segment 2 file for the year
    asked. Two of any of them is refused rather than resolved by taking the first, because a zip
    re-made on a Mac carries a `__MACOSX` copy of every file. The 2020 segment 3, group quarters,
-   is not read.
+   is not read. A member that is damaged, encrypted or compressed with a method `zipfile` cannot
+   read, such as Deflate64, exits 2 with one line. It does not escape as a traceback that exits 1,
+   the code for "the numbers disagreed".
 7. **That it is one file.** `LOGRECNO` is the key the geoheader and the segments are joined on,
    and the Census Bureau numbers it once per file. A repeat means two files were concatenated.
    Left alone, the second record replaces the first: a block leaves the extract while the row
@@ -226,9 +233,10 @@ P3, P4 and H1 in segment 2.
 
 There is no `GEOCODE` field in 2010. pl94 composes the key per summary level, using the
 concatenations in the Census Bureau's GEOID construction note: blocks are `STATE + COUNTY +
-TRACT + BLOCK`, tracts are `STATE + COUNTY + TRACT`, and so on. The note does not list 040 and
-050; pl94 uses `STATE` and `STATE + COUNTY` for them. A level that has no rule composes no key,
-and pl94 refuses to extract it. The level table names the composed GEOID instead of `GEOCODE`:
+TRACT + BLOCK`, tracts are `STATE + COUNTY + TRACT`, and so on. pl94 implements fourteen of the
+note's rules, not all of them; the Limits section names the ones it leaves out. The note does not
+list 040 and 050; pl94 uses `STATE` and `STATE + COUNTY` for them. A level that has no rule
+composes no key, and pl94 refuses to extract it. The level table names the composed GEOID instead of `GEOCODE`:
 
 ```
 $ python pl94.py --pl wy2010.pl.zip --county 021 --year 2010
@@ -270,6 +278,10 @@ The layout was checked against two sources and one real file:
   `ALAND10` and `AWATER10` on every block. In the same county, levels 060, 140, 150 and 700
   reconcile in both years.
 
+The self-test also writes one synthetic 2010 record with every field the key rules read, each at
+its full width and at its published position. It checks all sixteen composed keys against the
+concatenations in the note, so a slice that starts one character late fails the self-test.
+
 The self-test pins the layout with four real 2010 Wyoming records: the county's geoheader record,
 a senate district's geoheader record, and the county's segment 1 and segment 2 rows. Two of them are 500
 characters, mostly spaces. The self-test writes them as runs of text and runs of spaces, and it
@@ -280,9 +292,9 @@ checks each one against the SHA-1 of the published line.
 | Code | Meaning |
 |---|---|
 | 0 | The extract reconciles to the county record in the same file. |
-| 1 | It does not. The reasons are printed and the CSV was not written. |
-| 2 | The file could not be read, or the CSV could not be written. argparse also exits 2 for a flag it does not know, such as `--ap`. |
-| 64 | Usage error found by pl94: a missing `--pl` or `--county`, a malformed `--county`, `--sumlev` or `--year`, or `--apply` without `--out`. |
+| 1 | It does not. The reasons are printed, and the CSV is not written unless `--allow-unreconciled` was passed. A failed `--self-test` also exits 1. |
+| 2 | The file could not be read, or the CSV could not be written. A damaged, encrypted or Deflate64 zip member is an unreadable file. argparse also exits 2 for a flag it does not know, such as `--ap`. |
+| 64 | Usage error found by pl94: a missing `--pl` or `--county`, a malformed `--county`, `--sumlev` or `--year`, `--apply` without `--out`, or an `--out` that is the `--pl` zip itself. `--county` and `--sumlev` must be three ASCII digits. |
 
 Exit 1 and exit 2 are kept apart on purpose. A scheduled job reads 1 as "the numbers disagreed",
 which is a fact about the data. A write that failed is a fact about the disk and needs a different
@@ -315,9 +327,10 @@ its areas.
 
 The Census Bureau's own API is the obvious tool and it is the right one for most work.
 `api.census.gov/data/2020/dec/pl` takes a geography clause, so SUMLEV never comes up, and `cenpy`
-and `censusdata` wrap it in a dataframe. The gap is bulk and offline. The API caps variables per
-call and paginates geography, so every block in a state is hundreds of requests against a live
-service, and a key that expires mid-run leaves a partial answer that looks whole. The bulk zip is
+and `censusdata` wrap it in a dataframe. The gap is bulk and offline. The API's user guide
+documents a cap of 50 variables per call. Its geography listing,
+`api.census.gov/data/2020/dec/pl/geography.json`, says a block query needs a state, a county and
+a tract in its `in` clause. Every one of those queries goes to a live service. The bulk zip is
 one download and is complete. It just will not tell you which of its rows may be added together.
 
 The handwritten version has two bugs and the self-test pins both:
@@ -345,10 +358,13 @@ cannot also report success.
 
 - **2010 and 2020 only.** The 2000 PL file has another layout, and pl94 refuses any other
   `--year`.
-- **2010 keys exist only for the levels in the GEOID construction note**, plus 040 and 050.
-  Summary level 155 (place within county) and the American Indian area levels have no rule, so a
-  2010 extract of them is refused. They still appear in the level table, where the composed GEOID
-  prefix "misses" them because they have no key at all.
+- **2010 keys exist for a subset of the GEOID construction note**, plus 040 and 050. pl94 does
+  not implement the note's rules for the American Indian area levels 230, 281, 283 and 286, or
+  its dissolve rule for 280. In the real 2010 New Mexico and Wyoming files every record at those
+  levels has a blank `COUNTY`, so no county extract can reach them. Summary level 155 (place
+  within county) is not in the note and has no rule either, so a 2010 extract of it is refused.
+  It still appears in the level table, where the composed GEOID prefix "misses" it because it has
+  no key at all.
 - Segments 1 and 2 only. pl94 reads P1, P2 and H1. Voting-age population is P3 and P4 in segment
   2, and pl94 does not read it. The 2020 segment 3, group quarters, is not read either.
 - One county per run. Reconciling a whole state means one run per county, which is what the
@@ -359,8 +375,24 @@ cannot also report success.
 - Reconciling against the county record proves the extract is complete and not double counted. It
   does not prove the Census Bureau's own numbers, and it cannot see differential privacy noise,
   which the 2020 file carries by design at block level.
-- Exit 2 has two causes: an unreadable file, and a flag argparse does not know, such as `--ap`.
-  argparse exits before pl94 sees the arguments. Read stderr to tell them apart.
+- Exit 2 has three causes: an unreadable file, a CSV that could not be written, and an argument
+  that argparse rejects. argparse rejects an unknown flag such as `--ap`, and a flag with no
+  value such as a bare `--county`, before pl94 sees the arguments. Read stderr to tell them apart.
+- A write that fails partway, such as a full disk, can leave a truncated CSV at `--out`, and pl94
+  exits 2 to say so. It does not write to a temporary file and rename it.
+- A refused run, or a run without `--apply`, leaves an older file at `--out` unchanged. A job
+  must check the exit code, not whether the file exists.
+- pl94 does not check that the keys in an extract are unique. Two records with the same
+  `GEOCODE` or composed GEOID would both be written. No real 2010 or 2020 file tested has one.
+- `GEOCODE` values are written to the CSV and printed in refusal reasons as the file gives them.
+  A crafted geoheader could put a spreadsheet formula or a terminal escape code there. Real Census
+  `GEOCODE` values are digits only.
+- pl94 reads the files as latin-1 and checks the 2010 geoheader length in bytes. A 2010 geoheader
+  re-encoded as UTF-8, with accented names, fails as malformed and exits 2 instead of being read.
+- On Windows, a `--pl` file name with a character outside the console code page, such as a
+  Chinese character, crashes the report with a `UnicodeEncodeError` when stdout goes to a file.
+  The run exits 1 and writes no CSV, even with `--apply`, because the report prints before the
+  write.
 - The tool makes no network calls, so there is no network path to test against a stub server.
 - The whole county's admitted records are held in memory. A large county is a few hundred thousand
   small tuples, which is fine; the whole state at once would not be.

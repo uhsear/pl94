@@ -12,10 +12,10 @@ is still the right order of magnitude, which is what makes it survive review.
 The Census Bureau's own API is the obvious tool and it is the right one for
 most work. api.census.gov/data/2020/dec/pl takes a geography clause, so
 SUMLEV never comes up, and cenpy and censusdata wrap it in a dataframe. The
-gap is bulk and offline: the API caps variables per call and paginates
-geography, so every block in a state is hundreds of requests against a live
-service, and a key that expires mid-run leaves a partial answer that looks
-whole. The bulk zip is one download and is complete. This tool reads that zip
+gap is bulk and offline: the API documents a cap of 50 variables per call,
+and its geography listing says a block query needs a state, a county and a
+tract in its "in" clause, all against a live service. The bulk zip is one
+download and is complete. This tool reads that zip
 and does the one thing the file format will not do for you: it proves the
 extract against the county control record carried in the same file, and
 refuses to write an extract that does not match.
@@ -32,8 +32,9 @@ extract, and that needs --apply.
     python pl94.py --pl wy2010.pl.zip --county 021 --year 2010
     python pl94.py --pl wy2020.pl.zip --county 021 --out blocks.csv --apply
 
-Exit codes: 0 the extract reconciles, 1 it does not and pl94 refused it,
-2 the file could not be read, 64 usage error.
+Exit codes: 0 the extract reconciles, 1 it does not (the CSV is written only
+with --allow-unreconciled), 2 the file could not be read, the CSV could not
+be written or argparse rejected an argument, 64 usage error found by pl94.
 """
 
 from __future__ import print_function
@@ -44,6 +45,7 @@ import csv
 import os
 import sys
 import zipfile
+import zlib
 
 # =============================================================================
 # CONFIGURATION. Deliberately not constants at the call site.
@@ -91,9 +93,12 @@ GEO2010 = {
 
 # So the 2010 key is COMPOSED, per summary level, from the concatenations in
 # the Census Bureau's "GEOID Construction for Matching" note for the 2010 PL
-# file. 040 and 050 are not in that note and are the obvious two. A level that
-# is not here composes no key, and pl94 refuses to extract it rather than
-# invent one. The 2020 GEOCODE for each level here is the same string.
+# file. 040 and 050 are not in that note and are the obvious two. This is a
+# SUBSET of the note: its rules for the American Indian area levels 230, 281,
+# 283 and 286, and its dissolve rule for 280, are not here. Those records
+# carry a blank COUNTY, so no county extract can reach them. A level that is
+# not here composes no key, and pl94 refuses to extract it rather than invent
+# one. The 2020 GEOCODE for each level here is the same string.
 GEOID2010 = {
     "040": ("state",),
     "050": ("state", "county"),
@@ -214,7 +219,7 @@ class MissingMember(ValueError):
 # ------------------------------------------------------------------- parsing
 
 def _line(raw):
-    """One record as text. PL files are latin-1 and CRLF terminated."""
+    """One record as text. PL files are latin-1, and lines end LF or CRLF."""
     if isinstance(raw, bytes):
         raw = raw.decode("latin-1")
     return raw.rstrip("\r\n")
@@ -291,6 +296,16 @@ def parse_seg2_line(line, sep=SEG_SEP):
 
 # The geoheader parser for each year. Defined here, after both parsers.
 GEO_PARSERS = {"2020": parse_geo_line, "2010": parse_geo_line_2010}
+
+
+def _three_digits(text):
+    """True for exactly three ASCII digits.
+
+    Not str.isdigit() alone: that accepts Arabic-Indic and other Unicode
+    digits, which then match no county and crash the report on a console
+    that cannot print them.
+    """
+    return len(text) == 3 and all(c in "0123456789" for c in text)
 
 
 def _whole(text, what, geoid):
@@ -521,10 +536,10 @@ def scan(geo_lines, seg_lines, seg2_lines, county_fips,
     if year not in GEO_PARSERS:
         raise ValueError("year must be one of %s, got %r"
                          % (", ".join(YEARS), year))
-    if not (len(county_fips) == 3 and county_fips.isdigit()):
+    if not _three_digits(county_fips):
         raise ValueError("county FIPS must be three digits, got %r"
                          % (county_fips,))
-    if not (len(sumlev) == 3 and sumlev.isdigit()):
+    if not _three_digits(sumlev):
         raise ValueError("summary level must be three digits, got %r"
                          % (sumlev,))
 
@@ -646,6 +661,7 @@ def self_test():
     command line half runs against is built here, in a temporary directory,
     out of the same field layout the parser reads.
     """
+    import atexit
     import contextlib
     import hashlib
     import io
@@ -688,12 +704,12 @@ def self_test():
 
     def geo_line(sumlev, logrec, geocode, county="", land="1000", water="0"):
         f = [""] * 97
-        f[0], f[1] = "PLST", "FL"
+        f[0], f[1] = "PLST", "ZZ"
         f[2] = sumlev
         f[7] = logrec
         f[9] = geocode
-        f[12] = "12"
-        f[13] = "00294478"          # STATENS, the field that is NOT the county
+        f[12] = "99"
+        f[13] = "00009999"          # STATENS, the field that is NOT the county
         f[14] = county
         f[84] = land
         f[85] = water
@@ -703,7 +719,7 @@ def self_test():
                  total=None):
         one = white + black + aian + asian + nhpi + other
         f = ["0"] * 149
-        f[0], f[1] = "PLST", "FL"
+        f[0], f[1] = "PLST", "ZZ"
         f[4] = logrec
         f[5] = str(one + two if total is None else total)
         f[6] = str(one)
@@ -715,35 +731,35 @@ def self_test():
 
     def seg2_line(logrec, occupied, vacant, total=None):
         f = ["0"] * 152
-        f[0], f[1], f[3] = "PLST", "FL", "02"
+        f[0], f[1], f[3] = "PLST", "ZZ", "02"
         f[4] = logrec
         f[149] = str(occupied + vacant if total is None else total)
         f[150] = str(occupied)
         f[151] = str(vacant)
         return "|".join(f)
 
-    # One synthetic state file, laid out like the real ones. County 083 holds
+    # One synthetic state file, laid out like the real ones. County 045 holds
     # three blocks of 10, 12 and 8. Every level over them repeats the same 30
-    # people. Two levels that are not in the county at all carry 083 where a
+    # people. Two levels that are not in the county at all carry 045 where a
     # county FIPS would sit, and one level that IS in the county does not.
     # The blocks hold 1000 square metres of land each, and the second of them
     # 7 of water, so every level over them carries 3000 and 7.
     geo_rows = [
-        geo_line("040", "0000001", "12"),                      # state
-        geo_line("050", "0000002", "12083", "083", "3000", "7"),  # control
-        geo_line("140", "0000003", "12083000100", "083", "3000", "7"),
-        geo_line("150", "0000004", "120830001001", "083", "3000", "7"),
+        geo_line("040", "0000001", "99"),                      # state
+        geo_line("050", "0000002", "99045", "045", "3000", "7"),  # control
+        geo_line("140", "0000003", "99045000100", "045", "3000", "7"),
+        geo_line("150", "0000004", "990450001001", "045", "3000", "7"),
         # Listed OUT of GEOID order on purpose. Three blocks written in
         # ascending order would sort into the order they were read, and
         # an assertion about sorting would pass with no sort at all.
-        geo_line("750", "0000005", "120830001001003", "083"),  # block
-        geo_line("750", "0000006", "120830001001001", "083"),  # block
-        geo_line("750", "0000007", "120830001001002", "083", "1000", "7"),
-        geo_line("620", "0000008", "12083"),                   # SLDL 083
-        geo_line("160", "0000009", "1208300"),                 # place 08300
-        geo_line("155", "0000012", "1254000083", "083", "3000", "7"),
-        geo_line("050", "0000010", "12081", "081"),            # next county
-        geo_line("750", "0000011", "120810001001001", "081"),  # its block
+        geo_line("750", "0000005", "990450001001003", "045"),  # block
+        geo_line("750", "0000006", "990450001001001", "045"),  # block
+        geo_line("750", "0000007", "990450001001002", "045", "1000", "7"),
+        geo_line("620", "0000008", "99045"),                   # SLDL 045
+        geo_line("160", "0000009", "9904500"),                 # place 04500
+        geo_line("155", "0000012", "9954000045", "045", "3000", "7"),
+        geo_line("050", "0000010", "99047", "047"),            # next county
+        geo_line("750", "0000011", "990470001001001", "047"),  # its block
     ]
     # H1 for the same records: blocks of 4, 5 and 3 housing units under a
     # county of 12.
@@ -755,7 +771,7 @@ def self_test():
         seg2_line("0000005", 3, 1),                         # block, 4
         seg2_line("0000006", 5, 0),                         # block, 5
         seg2_line("0000007", 2, 1),                         # block, 3
-        seg2_line("0000008", 2, 0),                         # SLDL 083, 2
+        seg2_line("0000008", 2, 0),                         # SLDL 045, 2
         seg2_line("0000009", 1, 0),                         # place, 1
         seg2_line("0000012", 10, 2),                        # place-county, 12
         seg2_line("0000010", 35, 5),                        # next county, 40
@@ -772,7 +788,7 @@ def self_test():
         seg_line("0000005", 5, 2, 1, 1, 0, 0, 1, 3),        # block, 10
         seg_line("0000006", 7, 3, 0, 1, 1, 0, 0, 2),        # block, 12
         seg_line("0000007", 4, 1, 0, 0, 0, 2, 1, 2),        # block, 8
-        seg_line("0000008", 3, 1, 0, 0, 0, 1, 0, 1),        # SLDL 083, 5
+        seg_line("0000008", 3, 1, 0, 0, 0, 1, 0, 1),        # SLDL 045, 5
         seg_line("0000009", 1, 1, 0, 0, 0, 0, 0, 0),        # place, 2
         seg_line("0000012", 16, 6, 1, 2, 1, 2, 2, 7),       # place-county, 30
         seg_line("0000010", 50, 20, 4, 10, 1, 8, 6, 20),    # next county, 99
@@ -788,21 +804,30 @@ def self_test():
     row = parse_geo_line(geo_rows[4])
     check(row.sumlev == "750", "a geoheader record's SUMLEV is read at 2")
     check(row.logrecno == "0000005", "its LOGRECNO is read at 7")
-    check(row.geocode == "120830001001003", "its GEOCODE is read at 9")
+    check(row.geocode == "990450001001003", "its GEOCODE is read at 9")
     check((row.arealand, row.areawatr) == ("1000", "0"),
           "AREALAND and AREAWATR are read as text, so the extract copies "
           "them as written and only the reconcile turns them into numbers")
-    raises(lambda: parse_geo_line("12|083"),
+    padded = geo_rows[4].split("|")
+    padded[7], padded[14] = "0000005 ", " 045"
+    padded = parse_geo_line("|".join(padded))
+    check((padded.logrecno, padded.county) == ("0000005", "045"),
+          "a LOGRECNO or COUNTY padded with a space is read stripped, so it "
+          "still joins and still matches its county")
+    raises(lambda: parse_geo_line("12|045"),
            "a geoheader record with 2 fields instead of 97 raises")
     raises(lambda: parse_geo_line(geo_rows[4] + "|extra"),
            "a geoheader record with 98 fields raises, because the layout is "
            "exact")
-    raises(lambda: parse_geo_line("PLST FL750  0000005120830001001001"),
+    raises(lambda: parse_geo_line("PLST ZZ750  0000005990450001001001"),
            "a fixed-width record with no pipes raises rather than reading as "
            "97 empty fields  <-- pinned defect")
 
     logrec, counts = parse_seg1_line(seg_rows[4])
     check(logrec == "0000005", "a segment 1 record's LOGRECNO is read at 4")
+    check(parse_seg1_line(seg_rows[4].replace("|0000005|", "|0000005 |"))[0]
+          == "0000005",
+          "and read stripped, so a padded one still joins the geoheader")
     check(counts.total == 10, "P0010001 is read at 5")
     check(counts.one_race == 9,
           "P0010002 is read at 6 and kept apart from the parts")
@@ -1010,6 +1035,49 @@ def self_test():
           "so the prefix admits it and the COUNTY field, blank in the record, "
           "does not")
 
+    # Every field the 2010 key rules read, each filled to its full width at
+    # the 1-based position in Figure 2-4 and in the Bureau's SAS import
+    # program, pl_all_3_2010.sas. A full-width value is what catches a slice
+    # that starts one character late: a short, right-aligned value would
+    # still read whole through it. BLKGRP is 2 under a block that starts
+    # with 1, so a BLKGRP slice one late reads the block's first digit and
+    # fails, where a real file, whose block numbers start with their block
+    # group, would hide it.
+    full = [" "] * 500
+    for pos, text in ((19, "0000042"), (28, "99"), (30, "045"),
+                      (37, "12345"), (46, "23456"), (55, "000100"),
+                      (61, "2"), (62, "1001"), (68, "34567"), (154, "07"),
+                      (156, "021"), (159, "045"), (162, "ABC123"),
+                      (177, "45678"), (184, "56789"), (189, "67890"),
+                      (194, "78901"), (199, "12345678901234"),
+                      (213, "98765432109876")):
+        full[pos - 1:pos - 1 + len(text)] = list(text)
+
+    def composed(sumlev):
+        full[8:11] = list(sumlev)
+        return parse_geo_line_2010("".join(full)).geocode
+    rules = {"040": "99", "050": "99045", "060": "9904512345",
+             "067": "990451234545678", "140": "99045000100",
+             "150": "990450001002", "160": "9923456", "170": "9934567",
+             "500": "9907", "610": "99021", "620": "99045",
+             "700": "99045ABC123", "750": "990450001001001",
+             "950": "9956789", "960": "9967890", "970": "9978901"}
+    check(dict((lv, composed(lv)) for lv in rules) == rules,
+          "all sixteen 2010 GEOID rules compose the concatenation the "
+          "construction note prints, out of full-width fields at the "
+          "published positions  <-- pinned defect")
+    check(sorted(GEOID2010) == sorted(rules),
+          "and those sixteen are every rule pl94 has, so none is untested")
+    wide = parse_geo_line_2010("".join(full))
+    check((wide.logrecno, wide.arealand, wide.areawatr)
+          == ("0000042", "12345678901234", "98765432109876"),
+          "a 14 digit AREALAND and AREAWATR read whole, so neither area "
+          "loses its leading digit")
+    full[161:167] = list("    12")
+    check(composed("700") == "9904512",
+          "a VTD the file left-pads with blanks is stripped before it is "
+          "joined, as the construction note says it must be")
+
     wy_logrec, wy_counts = parse_seg1_line(wy_seg1, ",")
     check(wy_logrec == wy.logrecno and wy_counts.total == 91738,
           "the real 2010 segment 1 record is comma delimited, joins on "
@@ -1032,63 +1100,63 @@ def self_test():
           "so P0010002 is not in RACE_PARTS at all")
 
     # ---- the county gate. Summary level first, then the prefix.
-    check(prefix_only_match("12083", "083"),
-          "the prefix-only filter admits GEOCODE 12083")
-    check(prefix_only_match("120830001001001", "083"),
-          "and it admits a block in county 083")
-    check(not prefix_only_match("12081", "083"),
-          "and it rejects the neighbouring county 081")
-    check(not prefix_only_match("12", "083"),
+    check(prefix_only_match("99045", "045"),
+          "the prefix-only filter admits GEOCODE 99045")
+    check(prefix_only_match("990450001001001", "045"),
+          "and it admits a block in county 045")
+    check(not prefix_only_match("99047", "045"),
+          "and it rejects the neighbouring county 047")
+    check(not prefix_only_match("99", "045"),
           "and a GEOCODE shorter than five characters cannot match")
     by_logrec = dict((parse_geo_line(g).logrecno, parse_geo_line(g))
                      for g in geo_rows)
     sldl, place, block, control = (by_logrec["0000008"], by_logrec["0000009"],
                                    by_logrec["0000005"], by_logrec["0000002"])
-    check(prefix_only_match(sldl.geocode, "083")
-          and not in_county(sldl, "083"),
-          "a SUMLEV 620 legislative district numbered 083 has GEOCODE 12083, "
-          "passes the prefix test and is NOT in county 083  <-- pinned defect")
+    check(prefix_only_match(sldl.geocode, "045")
+          and not in_county(sldl, "045"),
+          "a SUMLEV 620 legislative district numbered 045 has GEOCODE 99045, "
+          "passes the prefix test and is NOT in county 045  <-- pinned defect")
     check(sldl.county == "",
           "because its COUNTY field is empty, which is how the file says so")
-    check(prefix_only_match(place.geocode, "083")
-          and not in_county(place, "083"),
-          "a SUMLEV 160 place with GEOCODE 1208300 passes the prefix test and "
-          "is NOT in county 083  <-- pinned defect")
-    check(in_county(block, "083"), "a block in county 083 is admitted")
-    check(in_county(control, "083"),
+    check(prefix_only_match(place.geocode, "045")
+          and not in_county(place, "045"),
+          "a SUMLEV 160 place with GEOCODE 9904500 passes the prefix test and "
+          "is NOT in county 045  <-- pinned defect")
+    check(in_county(block, "045"), "a block in county 045 is admitted")
+    check(in_county(control, "045"),
           "the county control record is admitted")
-    check(not in_county(by_logrec["0000011"], "083"),
-          "a block of county 081 in the same state file is dropped")
+    check(not in_county(by_logrec["0000011"], "045"),
+          "a block of county 047 in the same state file is dropped")
     cross = by_logrec["0000012"]
-    check(in_county(cross, "083")
-          and not prefix_only_match(cross.geocode, "083"),
-          "a SUMLEV 155 record IS in county 083 even though its GEOCODE is "
+    check(in_county(cross, "045")
+          and not prefix_only_match(cross.geocode, "045"),
+          "a SUMLEV 155 record IS in county 045 even though its GEOCODE is "
           "state + place + county and fails the prefix test  <-- pinned "
           "defect")
-    check(not in_county(by_logrec["0000001"], "083"),
+    check(not in_county(by_logrec["0000001"], "045"),
           "the state record is in no county at all")
     check(not in_county(by_logrec["0000001"], ""),
-          "and an empty county FIPS matches nothing, rather than matching\n"
+          "and an empty county FIPS matches nothing, rather than matching "
           "every record whose COUNTY field is also empty  <-- pinned defect")
     check(not in_county(sldl, ""),
           "which is the same record set the prefix filter would have "
           "called a county")
-    check(by_logrec["0000005"].state == "12",
+    check(by_logrec["0000005"].state == "99",
           "STATE is read at 12, two fields before COUNTY, not one  "
           "<-- pinned defect")
 
     # ---- the whole scan over the synthetic state file
-    report = scan(geo_rows, seg_rows, seg2_rows, "083")
+    report = scan(geo_rows, seg_rows, seg2_rows, "045")
     check(report.reconciled,
           "three blocks of 10, 12 and 8 reconcile to a county record of 30")
     check(report.extract_total == 30, "the extract sums to 30")
     check(report.control_total == 30,
           "the control total comes from the file's own SUMLEV 050 row")
-    check(report.control_geoid == "12083",
+    check(report.control_geoid == "99045",
           "and that row is named in the report")
     check(len(report.extract_rows) == 3, "three blocks are extracted")
     check([r[0] for r in report.extract_rows]
-          == ["120830001001001", "120830001001002", "120830001001003"],
+          == ["990450001001001", "990450001001002", "990450001001003"],
           "the extract is ordered by GEOID, so two runs over an unchanged "
           "file produce the same bytes")
     check([r[0] for r in report.extract_rows]
@@ -1156,16 +1224,16 @@ def self_test():
           "every block's occupied and vacant add to its housing total")
 
     # ---- the neighbouring county, read out of the same file
-    other = scan(geo_rows, seg_rows, seg2_rows, "081")
+    other = scan(geo_rows, seg_rows, seg2_rows, "047")
     check(other.reconciled and other.extract_total == 99,
-          "county 081 reconciles out of the same state file")
-    check([r[0] for r in other.extract_rows] == ["120810001001001"],
+          "county 047 reconciles out of the same state file")
+    check([r[0] for r in other.extract_rows] == ["990470001001001"],
           "and its extract holds only its own block")
 
     # ---- refusals
     missing = scan([g for g in geo_rows
                     if g.split("|")[2] != "050"],
-                   seg_rows, seg2_rows, "083")
+                   seg_rows, seg2_rows, "045")
     check(not missing.reconciled and missing.control_total is None,
           "a file with no SUMLEV 050 row for the county is REFUSED, not "
           "reported against nothing  <-- pinned defect")
@@ -1173,7 +1241,7 @@ def self_test():
               for r in missing.reasons),
           "and the refusal says the control record is absent")
 
-    short = scan(geo_rows, without_seg("0000007"), seg2_rows, "083")
+    short = scan(geo_rows, without_seg("0000007"), seg2_rows, "045")
     check(not short.reconciled and short.extract_total == 22,
           "an extract of 22 against a control of 30 is REFUSED")
     check(any("a difference of -8" in r for r in short.reasons),
@@ -1185,7 +1253,7 @@ def self_test():
     over = scan(geo_rows,
                 without_seg("0000002")
                 + [seg_line("0000002", 10, 4, 1, 1, 1, 1, 2, 5)],
-                seg2_rows, "083")
+                seg2_rows, "045")
     check(not over.reconciled and over.extract_total == 30
           and over.control_total == 20,
           "an extract of 30 against a control of 20 is REFUSED")
@@ -1193,19 +1261,19 @@ def self_test():
           "and the difference is signed, so an over-count reads differently "
           "from an under-count of the same size  <-- pinned defect")
 
-    dup = scan(geo_rows + [geo_line("050", "0000013", "12083", "083")],
+    dup = scan(geo_rows + [geo_line("050", "0000013", "99045", "045")],
                seg_rows + [seg_line("0000013", 16, 6, 1, 2, 1, 2, 2, 7)],
-               seg2_rows, "083")
+               seg2_rows, "045")
     check(not dup.reconciled and any("ambiguous" in r for r in dup.reasons),
           "two SUMLEV 050 rows for one county are REFUSED as ambiguous, "
           "rather than one of them being picked")
 
-    orphan = scan(geo_rows, without_seg("0000002"), seg2_rows, "083")
+    orphan = scan(geo_rows, without_seg("0000002"), seg2_rows, "045")
     check(not orphan.reconciled
           and any("carries no population" in r for r in orphan.reasons),
           "a control record with no segment 1 row is REFUSED")
 
-    lost = scan(geo_rows, without_seg("0000006"), seg2_rows, "083")
+    lost = scan(geo_rows, without_seg("0000006"), seg2_rows, "045")
     check(not lost.reconciled
           and any("have no segment 1 row" in r for r in lost.reasons),
           "a block with no segment 1 row is REFUSED, not dropped from a sum "
@@ -1214,7 +1282,7 @@ def self_test():
     corrupt = scan(geo_rows,
                    without_seg("0000005")
                    + [seg_line("0000005", 4, 2, 1, 1, 0, 0, 1, 3, total=10)],
-                   seg2_rows, "083")
+                   seg2_rows, "045")
     check(corrupt.extract_total == 30,
           "a block whose P1_001 still says 10 while its race columns add to "
           "9 leaves the county total looking right")
@@ -1223,9 +1291,9 @@ def self_test():
           "and it is REFUSED anyway, because the row disagrees with itself  "
           "<-- pinned defect")
 
-    place = scan(geo_rows, seg_rows, seg2_rows, "083", "160")
+    place = scan(geo_rows, seg_rows, seg2_rows, "045", "160")
     check(not place.reconciled
-          and any("no record in county 083 carries summary level 160" in r
+          and any("no record in county 045 carries summary level 160" in r
                   for r in place.reasons),
           "asking for SUMLEV 160 out of a county is REFUSED: the place in "
           "this file is not in the county  <-- pinned defect")
@@ -1235,70 +1303,70 @@ def self_test():
           "and the refusal names the levels the file DOES carry for that "
           "county, read off the file rather than off a list in this tool")
 
-    itself = scan(geo_rows, seg_rows, seg2_rows, "083", "050")
+    itself = scan(geo_rows, seg_rows, seg2_rows, "045", "050")
     check(not itself.reconciled
           and any("proves nothing" in r for r in itself.reasons),
           "extracting the control record and checking it against itself is "
           "REFUSED  <-- pinned defect")
 
-    empty = scan(geo_rows, seg_rows, seg2_rows, "083", "070")
+    empty = scan(geo_rows, seg_rows, seg2_rows, "045", "070")
     check(not empty.reconciled and empty.extract_total == 0,
           "a summary level the file does not carry at all extracts nothing "
           "and is REFUSED, rather than reconciling zero against zero")
 
-    cross_only = scan(geo_rows, seg_rows, seg2_rows, "083", "155")
+    cross_only = scan(geo_rows, seg_rows, seg2_rows, "045", "155")
     check(cross_only.reconciled and cross_only.extract_total == 30,
           "the SUMLEV 155 record the prefix filter would have missed "
           "reconciles as its own extract")
 
-    bg = scan(geo_rows, seg_rows, seg2_rows, "083", "150")
+    bg = scan(geo_rows, seg_rows, seg2_rows, "045", "150")
     check(bg.reconciled and bg.extract_total == 30,
           "the block group level reconciles too, so --sumlev is real")
 
     check(scan(geo_rows + ["", "   "], seg_rows + [""], seg2_rows + [" "],
-               "083").reconciled,
+               "045").reconciled,
           "blank lines at the end of any of the three files are skipped")
 
     # ---- two files joined together. LOGRECNO is the join key, so a repeat
     # silently replaces a record rather than adding one.
     raises(lambda: scan(geo_rows + [geo_line("750", "0000005",
-                                             "120830009009009", "083")],
-                        seg_rows, seg2_rows, "083"),
+                                             "990450009009009", "045")],
+                        seg_rows, seg2_rows, "045"),
            "a LOGRECNO repeated in the geoheader raises, rather than the "
            "second record replacing the first and a block leaving the "
            "extract without changing the row count  <-- pinned defect")
     raises(lambda: scan(geo_rows,
                         seg_rows + [seg_line("0000005", 99, 0, 0, 0, 0, 0, 0,
                                              0)],
-                        seg2_rows, "083"),
+                        seg2_rows, "045"),
            "a LOGRECNO repeated in segment 1 raises, rather than the second "
            "population replacing the first  <-- pinned defect")
     check(scan(geo_rows,
                seg_rows + [seg_line("0009999", 99, 0, 0, 0, 0, 0, 0, 0)],
-               seg2_rows, "083").reconciled,
+               seg2_rows, "045").reconciled,
           "while a segment 1 row for a LOGRECNO this county does not carry "
           "is ignored, because the file holds the whole state")
     raises(lambda: scan(geo_rows, seg_rows,
-                        seg2_rows + [seg2_line("0000005", 9, 0)], "083"),
+                        seg2_rows + [seg2_line("0000005", 9, 0)], "045"),
            "a LOGRECNO repeated in segment 2 raises too, rather than the "
            "second housing count replacing the first  <-- pinned defect")
 
     # ---- H1 refusals. Population can reconcile while housing does not.
-    homeless = scan(geo_rows, seg_rows, without_seg2("0000006"), "083")
+    homeless = scan(geo_rows, seg_rows, without_seg2("0000006"), "045")
     check(not homeless.reconciled
           and any("have no segment 2 row" in r for r in homeless.reasons),
           "a block with no segment 2 row is REFUSED, not dropped")
     check(len(homeless.extract_rows) == 2,
           "and it is left out of the rows rather than written with blank "
           "housing cells")
-    no_hu = scan(geo_rows, seg_rows, without_seg2("0000002"), "083")
+    no_hu = scan(geo_rows, seg_rows, without_seg2("0000002"), "045")
     check(not no_hu.reconciled and no_hu.control_hu is None
           and any("carries no housing count" in r for r in no_hu.reasons),
           "a county record with no segment 2 row is REFUSED, and its housing "
           "total is none, not zero")
     extra_home = scan(geo_rows, seg_rows,
                       without_seg2("0000006") + [seg2_line("0000006", 5, 1)],
-                      "083")
+                      "045")
     check(extra_home.extract_total == extra_home.control_total == 30,
           "a block whose H1 says 6 where the county allows 5 leaves the "
           "population reconciled at 30")
@@ -1311,8 +1379,8 @@ def self_test():
     torn = scan(geo_rows, seg_rows,
                 without_seg2("0000005") + [seg2_line("0000005", 2, 1,
                                                      total=4)],
-                "083")
-    check(not torn.reconciled and torn.bad_housing == ["120830001001003"]
+                "045")
+    check(not torn.reconciled and torn.bad_housing == ["990450001001003"]
           and any("occupied and vacant do not add" in r
                   for r in torn.reasons),
           "a block whose occupied and vacant add to 3 under a total of 4 is "
@@ -1322,10 +1390,10 @@ def self_test():
     # ---- area refusals. A block with no people and no homes moves
     # neither P1 nor H1, so a filter that drops empty blocks reconciles on
     # both. Only the land area sees it go.
-    empty_block = geo_line("750", "0000014", "120830001001004", "083", "500")
+    empty_block = geo_line("750", "0000014", "990450001001004", "045", "500")
     roomy = scan(geo_rows + [empty_block],
                  seg_rows + [seg_line("0000014", 0, 0, 0, 0, 0, 0, 0, 0)],
-                 seg2_rows + [seg2_line("0000014", 0, 0)], "083")
+                 seg2_rows + [seg2_line("0000014", 0, 0)], "045")
     check(roomy.extract_total == 30 and roomy.extract_hu == 12,
           "an extra block of 0 people and 0 housing units leaves P1 and H1 "
           "both reconciled")
@@ -1335,34 +1403,47 @@ def self_test():
           "and is REFUSED on AREALAND, 3500 square metres against 3000  "
           "<-- pinned defect")
     wet = scan([g.replace("|1000|7|", "|1000|9|") for g in geo_rows],
-               seg_rows, seg2_rows, "083")
+               seg_rows, seg2_rows, "045")
     check(not wet.reconciled
           and any("AREAWATR over summary level 750 sums to 9" in r
                   for r in wet.reasons),
           "AREAWATR is reconciled the same way, 9 against 7")
+    dry = scan([geo_line("050", "0000002", "99045", "045", "3000", "0")
+                if g.split("|")[7] == "0000002" else g for g in geo_rows],
+               seg_rows, seg2_rows, "045")
+    check(not dry.reconciled and dry.control_water == 0
+          and any("AREAWATR over summary level 750 sums to 7, the county "
+                  "control record 99045 says 0" in r for r in dry.reasons),
+          "a county whose AREAWATR is 0 is still a control: blocks with 7 "
+          "square metres of water against it are REFUSED, not skipped as if "
+          "the county had no figure")
     raises(lambda: scan([g.replace("|1000|7|", "||7|") for g in geo_rows],
-                        seg_rows, seg2_rows, "083"),
+                        seg_rows, seg2_rows, "045"),
            "a block with an empty AREALAND raises rather than adding as zero  "
            "<-- pinned defect")
     raises(lambda: scan([g.replace("|3000|7|", "|3000|x|") for g in geo_rows],
-                        seg_rows, seg2_rows, "083"),
+                        seg_rows, seg2_rows, "045"),
            "and so does a county record whose AREAWATR is not a number")
-    raises(lambda: scan(geo_rows, seg_rows, seg2_rows, "083", "750", "2000"),
+    raises(lambda: _whole("-500", "AREALAND", "990450001001001"),
+           "and a negative AREALAND, which int() would read and subtract from "
+           "the sum  <-- pinned defect")
+    raises(lambda: scan(geo_rows, seg_rows, seg2_rows, "045", "750", "2000"),
            "a year with no layout is refused before anything is read")
 
     # ---- the same synthetic state in the 2010 fixed-width layout. Written
     # at the 1-based positions Figure 2-4 prints, never through GEO2010.
     def geo_line_2010(sumlev, logrec, county="", tract="", blkgrp="",
-                      block="", sldl="", place="", land="1000", water="0"):
+                      block="", sldl="", place="", land="1000", water="0",
+                      name=""):
         f = [" "] * 500
 
         def put(pos, text):
             f[pos - 1:pos - 1 + len(text)] = list(text)
         put(1, "PLST")
-        put(7, "FL")
+        put(7, "ZZ")
         put(9, sumlev)
         put(19, logrec)
-        put(28, "12")
+        put(28, "99")
         put(30, county)
         put(46, place)
         put(55, tract)
@@ -1371,30 +1452,35 @@ def self_test():
         put(159, sldl)
         put(199, land.rjust(14))
         put(213, water.rjust(14))
+        put(227, name)
         return "".join(f)
 
+    # The county's NAME carries one latin-1 byte, n with a tilde, as names in
+    # the real 2010 New Mexico and Puerto Rico files do. Read as UTF-8, that
+    # byte is an error and the whole file exits 2.
     geo_rows_2010 = [
         geo_line_2010("040", "0000001"),
-        geo_line_2010("050", "0000002", "083", land="3000", water="7"),
-        geo_line_2010("140", "0000003", "083", "000100", land="3000",
+        geo_line_2010("050", "0000002", "045", land="3000", water="7",
+                      name=u"Ca\xf1ada County"),
+        geo_line_2010("140", "0000003", "045", "000100", land="3000",
                       water="7"),
-        geo_line_2010("150", "0000004", "083", "000100", "1", land="3000",
+        geo_line_2010("150", "0000004", "045", "000100", "1", land="3000",
                       water="7"),
-        geo_line_2010("750", "0000005", "083", "000100", block="1003"),
-        geo_line_2010("750", "0000006", "083", "000100", block="1001"),
-        geo_line_2010("750", "0000007", "083", "000100", block="1002",
+        geo_line_2010("750", "0000005", "045", "000100", block="1003"),
+        geo_line_2010("750", "0000006", "045", "000100", block="1001"),
+        geo_line_2010("750", "0000007", "045", "000100", block="1002",
                       water="7"),
-        geo_line_2010("620", "0000008", sldl="083"),
-        geo_line_2010("160", "0000009", place="08300"),
-        geo_line_2010("155", "0000012", "083", place="54000", land="3000",
+        geo_line_2010("620", "0000008", sldl="045"),
+        geo_line_2010("160", "0000009", place="04500"),
+        geo_line_2010("155", "0000012", "045", place="54000", land="3000",
                       water="7"),
-        geo_line_2010("050", "0000010", "081"),
-        geo_line_2010("750", "0000011", "081", "000100", block="1001"),
+        geo_line_2010("050", "0000010", "047"),
+        geo_line_2010("750", "0000011", "047", "000100", block="1001"),
     ]
     seg_rows_2010 = [s.replace("|", ",") for s in seg_rows]
     seg2_rows_2010 = [s.replace("|", ",") for s in seg2_rows]
 
-    r2010 = scan(geo_rows_2010, seg_rows_2010, seg2_rows_2010, "083",
+    r2010 = scan(geo_rows_2010, seg_rows_2010, seg2_rows_2010, "045",
                  year="2010")
     check(r2010.reconciled and r2010.year == "2010",
           "the same state written in the 2010 layout reconciles with "
@@ -1409,24 +1495,24 @@ def self_test():
           "county record")
     check(r2010.prefix_only_total == 127,
           "the composed GEOIDs fall into the same prefix trap, 127 for a "
-          "county of 30, because the district and the place compose 12083 "
-          "and 1208300")
+          "county of 30, because the district and the place compose 99045 "
+          "and 9904500")
     check(r2010.extract_rows[0][1].arealand == "1000",
           "a space-padded 2010 AREALAND is written to the extract as 1000, "
           "not as fourteen characters")
-    keyless = scan(geo_rows_2010, seg_rows_2010, seg2_rows_2010, "083", "155",
+    keyless = scan(geo_rows_2010, seg_rows_2010, seg2_rows_2010, "045", "155",
                    "2010")
     check(not keyless.reconciled
           and any("no 2010 rule" in r for r in keyless.reasons),
           "a 2010 SUMLEV 155 extract is REFUSED, because no GEOID rule "
           "exists for it, rather than written under an empty key  <-- "
           "pinned defect")
-    raises(lambda: scan(geo_rows_2010, seg_rows_2010, seg2_rows_2010, "083"),
+    raises(lambda: scan(geo_rows_2010, seg_rows_2010, seg2_rows_2010, "045"),
            "a 2010 file read as 2020 raises on its first record")
-    raises(lambda: scan(geo_rows, seg_rows, seg2_rows, "083", year="2010"),
+    raises(lambda: scan(geo_rows, seg_rows, seg2_rows, "045", year="2010"),
            "and a 2020 file read as 2010 raises the same way  <-- pinned "
            "defect")
-    raises(lambda: scan(geo_rows_2010, seg_rows, seg2_rows_2010, "083",
+    raises(lambda: scan(geo_rows_2010, seg_rows, seg2_rows_2010, "045",
                         year="2010"),
            "a pipe-delimited segment 1 read with the 2010 comma raises as "
            "truncated")
@@ -1451,10 +1537,14 @@ def self_test():
            "a two digit county FIPS is refused before anything is read")
     raises(lambda: scan(geo_rows, seg_rows, seg2_rows, "abc"),
            "a county FIPS that is not digits is refused")
-    raises(lambda: scan(geo_rows, seg_rows, seg2_rows, "083", "75"),
+    raises(lambda: scan(geo_rows, seg_rows, seg2_rows, "045", "75"),
            "a two digit summary level is refused")
-    raises(lambda: scan(geo_rows, seg_rows, seg2_rows, "083", "sev"),
+    raises(lambda: scan(geo_rows, seg_rows, seg2_rows, "045", "sev"),
            "a summary level that is not digits is refused")
+    raises(lambda: scan(geo_rows, seg_rows, seg2_rows,
+                        u"\u0660\u0668\u0663"),
+           "a county in Arabic-Indic digits is refused, although "
+           "str.isdigit() accepts it  <-- pinned defect")
 
     # ---- describe(), which is what an operator actually reads
     lines = describe(report, "state2020.pl.zip")
@@ -1497,7 +1587,7 @@ def self_test():
           in describe(missing, "x.zip"),
           "and as none, not zero, when there is no county record")
     lines_2010 = describe(r2010, "state2010.pl.zip")
-    check(lines_2010[1] == "  county 083, summary level 750, 2010 layout",
+    check(lines_2010[1] == "  county 045, summary level 750, 2010 layout",
           "a 2010 run says which layout it read")
     check(any(l.startswith("  620")
               and "NO, the composed GEOID prefix let it in" in l
@@ -1508,13 +1598,15 @@ def self_test():
     # ---- real files on disk. Everything below writes into one temporary
     # directory and deletes it again. No network, no credentials.
     tmp = tempfile.mkdtemp(prefix="pl94-selftest-")
+    # Also at exit, so a self-test that crashes partway leaves no directory.
+    atexit.register(shutil.rmtree, tmp, True)
 
     def make_zip(name, geo=None, seg=None, extra=None, seg2=None,
                  year="2020"):
         path = os.path.join(tmp, name)
         with zipfile.ZipFile(path, "w") as zf:
-            for member, rows in (("flgeo%s.pl", geo), ("fl00001%s.pl", seg),
-                                 ("fl00002%s.pl", seg2)):
+            for member, rows in (("zzgeo%s.pl", geo), ("zz00001%s.pl", seg),
+                                 ("zz00002%s.pl", seg2)):
                 if rows is not None:
                     zf.writestr(member % year,
                                 "\r\n".join(rows).encode("latin-1"))
@@ -1534,7 +1626,7 @@ def self_test():
     # the group quarters table, ends in "2020.pl" too, and is not read. Its
     # one record here is too short to parse, so reading it would fail.
     other_segments = [
-        ("fl000032020.pl", b"PLST|FL|000|03|0000005|9|9|9\r\n"),
+        ("zz000032020.pl", b"PLST|ZZ|000|03|0000005|9|9|9\r\n"),
     ]
     good_zip = make_zip("state2020.pl.zip", geo_rows, seg_rows,
                         other_segments, seg2_rows)
@@ -1542,12 +1634,12 @@ def self_test():
                          seg2=seg2_rows)
 
     check(sorted(zipfile.ZipFile(good_zip).namelist())
-          == ["fl000012020.pl", "fl000022020.pl", "fl000032020.pl",
-              "flgeo2020.pl"],
+          == ["zz000012020.pl", "zz000022020.pl", "zz000032020.pl",
+              "zzgeo2020.pl"],
           "the zip holds the four members a real PL download holds: the "
           "geoheader and segments 1, 2 and 3")
 
-    code, out, err = run_cli(["--pl", good_zip, "--county", "083"])
+    code, out, err = run_cli(["--pl", good_zip, "--county", "045"])
     check(code == 0, "the real zip reconciles through the command line, so "
                      "segment 2 is read as segment 2 and segment 3 is passed "
                      "over, neither read as more segment 1  <-- pinned "
@@ -1557,20 +1649,20 @@ def self_test():
           "and prints the 127 it refused to call a population")
     check(err == "", "a clean run writes nothing to stderr")
 
-    code, out, err = run_cli(["--pl", short_zip, "--county", "083"])
+    code, out, err = run_cli(["--pl", short_zip, "--county", "045"])
     check(code == 1, "a zip whose blocks do not reconcile exits 1")
     check("REFUSED" in out and "difference of -8" in out,
           "and prints the difference it found")
 
     # ---- the extract file itself
     dest = os.path.join(tmp, "blocks.csv")
-    code, out, err = run_cli(["--pl", good_zip, "--county", "083",
+    code, out, err = run_cli(["--pl", good_zip, "--county", "045",
                               "--out", dest])
     check(code == 0 and not os.path.exists(dest),
           "--out without --apply writes nothing  <-- pinned defect")
     check("was not written" in out, "and says the file was not written")
 
-    code, out, err = run_cli(["--pl", good_zip, "--county", "083",
+    code, out, err = run_cli(["--pl", good_zip, "--county", "045",
                               "--out", dest, "--apply"])
     check(code == 0 and os.path.exists(dest), "--apply writes the extract")
     with open(dest, "r") as fh:
@@ -1589,9 +1681,12 @@ def self_test():
           "<-- pinned defect")
     check(csv_rows[1][12:] == ["5", "5", "0"],
           "the H1 columns carry the block's own housing, occupied and vacant")
+    check(csv_rows[1][3:12] == ["12", "7", "3", "0", "1", "1", "0", "0", "2"],
+          "and total, the seven race columns and hispanic_any_race carry the "
+          "block's own 12, 7, 3, 0, 1, 1, 0, 0 and 2, each in its own column")
     check(sum(int(r[12]) for r in csv_rows[1:]) == 12,
           "and the written housing column adds up to the county's 12")
-    check(csv_rows[1][0] == "120830001001001" and csv_rows[1][3] == "12",
+    check(csv_rows[1][0] == "990450001001001" and csv_rows[1][3] == "12",
           "the first row is the lowest GEOID with its own population, "
           "which is the block the file lists second")
     check(csv_rows[1][1] == "1000" and csv_rows[1][2] == "0",
@@ -1603,7 +1698,7 @@ def self_test():
           "windows  <-- pinned defect")
 
     refused = os.path.join(tmp, "refused.csv")
-    code, out, err = run_cli(["--pl", short_zip, "--county", "083",
+    code, out, err = run_cli(["--pl", short_zip, "--county", "045",
                               "--out", refused, "--apply"])
     check(code == 1 and not os.path.exists(refused),
           "--apply does NOT write an extract that failed to reconcile  "
@@ -1611,7 +1706,7 @@ def self_test():
     check("Refused" in out and "--allow-unreconciled" in out,
           "and the refusal names the flag that would override it")
 
-    code, out, err = run_cli(["--pl", short_zip, "--county", "083",
+    code, out, err = run_cli(["--pl", short_zip, "--county", "045",
                               "--out", refused, "--apply",
                               "--allow-unreconciled"])
     check(os.path.exists(refused), "--allow-unreconciled writes it anyway")
@@ -1620,68 +1715,68 @@ def self_test():
           "<-- pinned defect")
 
     bg_csv = os.path.join(tmp, "bg.csv")
-    code, out, err = run_cli(["--pl", good_zip, "--county", "083",
+    code, out, err = run_cli(["--pl", good_zip, "--county", "045",
                               "--sumlev", "150", "--out", bg_csv, "--apply"])
     check(code == 0, "--sumlev 150 extracts the block group and reconciles")
     with open(bg_csv, "r") as fh:
         check(len(fh.read().splitlines()) == 2,
               "and writes one block group row under the header")
 
-    code, out, err = run_cli(["--pl", good_zip, "--county", "081"])
-    check(code == 0 and "12081" in out,
+    code, out, err = run_cli(["--pl", good_zip, "--county", "047"])
+    check(code == 0 and "99047" in out,
           "the neighbouring county reconciles out of the same zip")
 
     # ---- unreadable input
     code, out, err = run_cli(["--pl", os.path.join(tmp, "nope.zip"),
-                              "--county", "083"])
+                              "--county", "045"])
     check(code == 2 and "error:" in err, "a zip that is not there exits 2")
 
     not_a_zip = os.path.join(tmp, "plain.txt")
     with open(not_a_zip, "w") as fh:
         fh.write("this is not a zip file\n")
-    code, out, err = run_cli(["--pl", not_a_zip, "--county", "083"])
+    code, out, err = run_cli(["--pl", not_a_zip, "--county", "045"])
     check(code == 2, "a file that is not a zip exits 2")
 
     no_geo = make_zip("nogeo.zip", None, seg_rows, seg2=seg2_rows)
-    code, out, err = run_cli(["--pl", no_geo, "--county", "083"])
+    code, out, err = run_cli(["--pl", no_geo, "--county", "045"])
     check(code == 2 and "geoheader" in err,
           "a zip with no geoheader file exits 2 and says which file is "
           "missing")
 
     no_seg = make_zip("noseg.zip", geo_rows, None, seg2=seg2_rows)
-    code, out, err = run_cli(["--pl", no_seg, "--county", "083"])
+    code, out, err = run_cli(["--pl", no_seg, "--county", "045"])
     check(code == 2 and "segment 1" in err,
           "a zip with no segment 1 file exits 2 and says so")
 
     no_seg2 = make_zip("noseg2.zip", geo_rows, seg_rows)
-    code, out, err = run_cli(["--pl", no_seg2, "--county", "083"])
+    code, out, err = run_cli(["--pl", no_seg2, "--county", "045"])
     check(code == 2 and "no 2020 segment 2 file" in err,
           "a zip with no segment 2 file exits 2, rather than reconciling "
           "population and skipping housing  <-- pinned defect")
 
     two_geo = make_zip("twogeo.zip", geo_rows, seg_rows,
-                       [("__MACOSX/flgeo2020.pl", b"junk")], seg2_rows)
-    code, out, err = run_cli(["--pl", two_geo, "--county", "083"])
+                       [("__MACOSX/zzgeo2020.pl", b"junk")], seg2_rows)
+    code, out, err = run_cli(["--pl", two_geo, "--county", "045"])
     check(code == 2 and "look like the 2020 geoheader" in err,
           "two files that both look like the geoheader are REFUSED, not "
           "resolved by taking the first  <-- pinned defect")
     two_seg2 = make_zip("twoseg2.zip", geo_rows, seg_rows,
-                        [("old/fl000022020.pl", b"junk")], seg2_rows)
-    code, out, err = run_cli(["--pl", two_seg2, "--county", "083"])
+                        [("old/zz000022020.pl", b"junk")], seg2_rows)
+    code, out, err = run_cli(["--pl", two_seg2, "--county", "045"])
     check(code == 2 and "look like the 2020 segment 2" in err,
           "and so are two files that both look like segment 2")
 
     truncated = make_zip("trunc.zip", geo_rows,
                          seg_rows[:-1] + ["|".join(["0"] * 100)],
                          seg2=seg2_rows)
-    code, out, err = run_cli(["--pl", truncated, "--county", "083"])
+    code, out, err = run_cli(["--pl", truncated, "--county", "045"])
     check(code == 2 and "truncated" in err,
           "a truncated segment 1 record exits 2 rather than reading a short "
           "record as zeros")
 
     truncated2 = make_zip("trunc2.zip", geo_rows, seg_rows,
                           seg2=seg2_rows[:-1] + ["|".join(["0"] * 151)])
-    code, out, err = run_cli(["--pl", truncated2, "--county", "083"])
+    code, out, err = run_cli(["--pl", truncated2, "--county", "045"])
     check(code == 2 and "segment 2 record has 151 fields" in err,
           "and so does a truncated segment 2 record")
 
@@ -1689,51 +1784,147 @@ def self_test():
     zip_2010 = make_zip("state2010.pl.zip", geo_rows_2010, seg_rows_2010,
                         seg2=seg2_rows_2010, year="2010")
     csv_2010 = os.path.join(tmp, "blocks2010.csv")
-    code, out, err = run_cli(["--pl", zip_2010, "--county", "083",
+    code, out, err = run_cli(["--pl", zip_2010, "--county", "045",
                               "--year", "2010", "--out", csv_2010,
                               "--apply"])
     check(code == 0 and "RECONCILED" in out and "2010 layout" in out,
           "a 2010 zip reconciles through the command line with --year 2010")
+    with zipfile.ZipFile(zip_2010) as zf:
+        check(b"Ca\xf1ada County" in zf.read("zzgeo2010.pl"),
+              "and its geoheader carries the latin-1 byte 0xF1 in a county "
+              "name, so the file is read as latin-1, not UTF-8")
     with open(csv_2010, "r") as fh:
         rows_2010 = list(csv.reader(fh.read().splitlines()))
     check(rows_2010[1:] == csv_rows[1:],
           "and writes the same rows, byte for byte, as the same state in "
           "2020 form: same GEOIDs, unpadded areas, same counts")
-    code, out, err = run_cli(["--pl", zip_2010, "--county", "083"])
-    check(code == 2 and "flgeo2010.pl" in err,
+    code, out, err = run_cli(["--pl", zip_2010, "--county", "045"])
+    check(code == 2 and "zzgeo2010.pl" in err,
           "the same zip without --year exits 2 and names the 2010 members it "
           "does hold, so the fix is obvious  <-- pinned defect")
-    code, out, err = run_cli(["--pl", good_zip, "--county", "083",
+    code, out, err = run_cli(["--pl", good_zip, "--county", "045",
                               "--year", "2010"])
-    check(code == 2 and "flgeo2020.pl" in err,
+    check(code == 2 and "zzgeo2020.pl" in err,
           "and a 2020 zip read with --year 2010 exits 2 the same way")
     code, out, err = run_cli(["--pl", make_zip("empty.zip"), "--county",
-                              "083"])
+                              "045"])
     check(code == 2 and "which holds nothing" in err,
           "an empty zip says it holds nothing")
 
-    code, out, err = run_cli(["--pl", good_zip, "--county", "083",
+    # ---- damaged zips. zipfile raises three things that are not OSError
+    # for a member it cannot read, and each one used to escape as a
+    # traceback with exit 1, which means "the numbers disagreed".
+    deflated = os.path.join(tmp, "deflated.zip")
+    with zipfile.ZipFile(deflated, "w", zipfile.ZIP_DEFLATED) as zf:
+        for member, rows in (("zzgeo2020.pl", geo_rows),
+                             ("zz000012020.pl", seg_rows),
+                             ("zz000022020.pl", seg2_rows)):
+            zf.writestr(member, "\r\n".join(rows).encode("latin-1"))
+    check(run_cli(["--pl", deflated, "--county", "045"])[0] == 0,
+          "a deflated copy of the good zip reconciles")
+    with open(deflated, "rb") as fh:
+        pristine = fh.read()
+
+    def damaged(name, patch):
+        path = os.path.join(tmp, name)
+        data = bytearray(pristine)
+        patch(data)
+        with open(path, "wb") as fh:
+            fh.write(bytes(data))
+        return run_cli(["--pl", path, "--county", "045"])
+
+    def headers(data, local_off, central_off, value):
+        for sig, off in ((b"PK\x03\x04", local_off),
+                         (b"PK\x01\x02", central_off)):
+            at = data.find(sig)
+            while at != -1:
+                data[at + off] = value
+                at = data.find(sig, at + 4)
+
+    def bad_block(data):
+        # 0xFF opens a deflate block of type 3, which the format reserves.
+        name_len = data[26] + 256 * data[27]
+        extra_len = data[28] + 256 * data[29]
+        data[30 + name_len + extra_len] = 0xFF
+
+    code, out, err = damaged("badblock.zip", bad_block)
+    check(code == 2 and "error" in err and "Traceback" not in err,
+          "a geoheader member whose deflate stream is damaged exits 2 with "
+          "one line, not a traceback that exits 1  <-- pinned defect")
+    code, out, err = damaged("locked.zip",
+                             lambda d: headers(d, 6, 8, 0x01))
+    check(code == 2 and "encrypted" in err,
+          "an encrypted member exits 2 and says it is encrypted  <-- pinned "
+          "defect")
+    code, out, err = damaged("deflate64.zip",
+                             lambda d: headers(d, 8, 10, 9))
+    check(code == 2 and "compression method is not supported" in err,
+          "a Deflate64 member, which zipfile cannot read, exits 2  <-- "
+          "pinned defect")
+
+    victim = os.path.join(tmp, "victim.zip")
+    shutil.copyfile(good_zip, victim)
+    with open(victim, "rb") as fh:
+        victim_bytes = fh.read()
+    code, out, err = run_cli(["--pl", victim, "--county", "045",
+                              "--out", victim, "--apply"])
+    with open(victim, "rb") as fh:
+        check(code == 64 and fh.read() == victim_bytes
+              and "destroy the input" in err,
+              "--out naming the --pl zip itself is a usage error, and the zip "
+              "is left byte for byte as it was  <-- pinned defect")
+
+    code, out, err = run_cli(["--pl", good_zip, "--county", "045",
                               "--out", tmp, "--apply"])
     check(code == 2 and "could not write" in err,
           "an extract that cannot be written exits 2, not 1, because 1 means "
           "the numbers disagreed")
 
+    # Two exceptions no offline file here can raise: EOFError from zipfile
+    # on a member cut short, and csv.Error from the writer. Each is put in
+    # place of the function that would raise it, so both except clauses run.
+    def stubbed(name, exc, argv):
+        real = globals()[name]
+
+        def boom(*args):
+            raise exc("stubbed %s" % name)
+        globals()[name] = boom
+        try:
+            return run_cli(argv)
+        finally:
+            globals()[name] = real
+
+    code, out, err = stubbed("read_pl", EOFError,
+                             ["--pl", good_zip, "--county", "045"])
+    check(code == 2 and "error: stubbed read_pl" in err,
+          "an EOFError while the zip is read exits 2 with one line")
+    code, out, err = stubbed("write_csv", csv.Error,
+                             ["--pl", good_zip, "--county", "045",
+                              "--out", dest, "--apply"])
+    check(code == 2 and "could not write" in err,
+          "and a csv.Error while the extract is written exits 2 as well")
+
     # ---- usage errors
     check(run_cli([])[0] == 64, "no arguments at all is a usage error")
-    check(run_cli(["--county", "083"])[0] == 64, "--pl is required")
+    check(run_cli(["--county", "045"])[0] == 64, "--pl is required")
     check(run_cli(["--pl", good_zip])[0] == 64, "--county is required")
     check(run_cli(["--pl", good_zip, "--county", "83"])[0] == 64,
           "a two digit county is a usage error")
-    check(run_cli(["--pl", good_zip, "--county", "0083"])[0] == 64,
+    check(run_cli(["--pl", good_zip, "--county", "0045"])[0] == 64,
           "a four digit county is a usage error")
     check(run_cli(["--pl", good_zip, "--county", "08x"])[0] == 64,
           "a county that is not digits is a usage error")
-    check(run_cli(["--pl", good_zip, "--county", "083",
+    check(run_cli(["--pl", good_zip, "--county",
+                   u"\u0660\u0668\u0663"])[0] == 64,
+          "and so is one in Arabic-Indic digits, rather than a run that "
+          "matches nothing and then cannot print its own report  <-- pinned "
+          "defect")
+    check(run_cli(["--pl", good_zip, "--county", "045",
                    "--sumlev", "75"])[0] == 64,
           "a two digit summary level is a usage error")
-    check(run_cli(["--pl", good_zip, "--county", "083", "--apply"])[0] == 64,
+    check(run_cli(["--pl", good_zip, "--county", "045", "--apply"])[0] == 64,
           "--apply without --out is a usage error, not a silent no-op")
-    check(run_cli(["--pl", good_zip, "--county", "083",
+    check(run_cli(["--pl", good_zip, "--county", "045",
                    "--year", "2000"])[0] == 64,
           "a year with no layout is a usage error")
 
@@ -1747,7 +1938,7 @@ def self_test():
             return exc.code
 
     ap_dest = os.path.join(tmp, "abbrev.csv")
-    check(cli_exit(["--pl", good_zip, "--county", "083", "--out", ap_dest,
+    check(cli_exit(["--pl", good_zip, "--county", "045", "--out", ap_dest,
                     "--ap"]) == 2 and not os.path.exists(ap_dest),
           "--ap is refused by argparse with exit 2 and writes nothing, "
           "rather than being read as --apply  <-- pinned defect")
@@ -1790,7 +1981,7 @@ def self_test():
           "--allow-unreconciled is read")
     check(_parse(["--self-test"]).self_test is True, "--self-test is read")
     check(_parse(["--pl", "a.zip"]).pl == "a.zip", "--pl is read")
-    check(_parse(["--county", "083"]).county == "083", "--county is read")
+    check(_parse(["--county", "045"]).county == "045", "--county is read")
     check(_parse(["--sumlev", "150"]).sumlev == "150", "--sumlev is read")
     check(_parse(["--out", "b.csv"]).out == "b.csv", "--out is read")
     check(args.year == "2020",
@@ -1863,12 +2054,12 @@ def self_test():
 # ----------------------------------------------------------------------- cli
 
 def _is_geo(basename, year):
-    """The geoheader member of a PL zip, e.g. flgeo2020.pl or wygeo2010.pl."""
+    """The geoheader member of a PL zip, e.g. dcgeo2020.pl or wygeo2010.pl."""
     return basename.endswith("geo%s.pl" % year)
 
 
 def _is_seg(basename, number, year):
-    """Segment number of a PL zip, e.g. fl000012020.pl or wy000022010.pl."""
+    """Segment number of a PL zip, e.g. dc000012020.pl or wy000022010.pl."""
     return basename.endswith("%05d%s.pl" % (number, year))
 
 
@@ -1920,6 +2111,14 @@ def write_csv(path, rows):
                              homes.occupied, homes.vacant])
 
 
+def _same_file(a, b):
+    """True when two paths name one existing file."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def _parse(argv):
     ap = argparse.ArgumentParser(
         prog="pl94.py",
@@ -1939,7 +2138,7 @@ def _parse(argv):
                     help="the census year of --pl: 2020 (pipe delimited, the "
                          "default) or 2010 (fixed width)")
     ap.add_argument("--county",
-                    help="three digit county FIPS, e.g. 083. Required: there "
+                    help="three digit county FIPS, e.g. 021. Required: there "
                          "is no default.")
     ap.add_argument("--sumlev", default=DEFAULT_SUMLEV,
                     help="three digit summary level to extract (default %s, "
@@ -1967,14 +2166,14 @@ def main(argv=None):
               "without a Census download.", file=sys.stderr)
         return 64
     if not args.county:
-        print("error: --county is required, as three digits, e.g. 083.",
+        print("error: --county is required, as three digits, e.g. 021.",
               file=sys.stderr)
         return 64
-    if not (len(args.county) == 3 and args.county.isdigit()):
+    if not _three_digits(args.county):
         print("error: --county must be three digits, got %r."
               % (args.county,), file=sys.stderr)
         return 64
-    if not (len(args.sumlev) == 3 and args.sumlev.isdigit()):
+    if not _three_digits(args.sumlev):
         print("error: --sumlev must be three digits, got %r."
               % (args.sumlev,), file=sys.stderr)
         return 64
@@ -1986,10 +2185,22 @@ def main(argv=None):
         print("error: --apply needs --out. There is nothing else to apply.",
               file=sys.stderr)
         return 64
+    if args.out and _same_file(args.out, args.pl):
+        # The zip is read in full before the CSV is opened, so this would
+        # "work": the extract lands and the only copy of the input is gone.
+        print("error: --out is the --pl zip itself. Writing the extract "
+              "there would destroy the input.", file=sys.stderr)
+        return 64
 
     try:
         report = read_pl(args.pl, args.county, args.sumlev, args.year)
-    except (IOError, OSError, ValueError, zipfile.BadZipFile) as exc:
+    except (IOError, OSError, ValueError, zipfile.BadZipFile, zlib.error,
+            EOFError, RuntimeError) as exc:
+        # zlib.error is a damaged member, RuntimeError an encrypted one, and
+        # NotImplementedError (a RuntimeError) a compression method zipfile
+        # cannot read, such as Deflate64. None is an OSError, and each one
+        # left alone is a traceback that exits 1, the code for "the numbers
+        # disagreed".
         print("error: %s" % exc, file=sys.stderr)
         return 2
 
