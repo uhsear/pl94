@@ -11,11 +11,12 @@ on characters three to five and sum the population column.
 
 That filter is wrong in both directions, and the file will not tell you.
 
-It lets in what is not there. `GEOCODE` is laid out differently for each of the forty-odd summary
-levels in the file, and several of them put three digits exactly where a county FIPS would sit. In
-the real 2020 file for the District of Columbia, county 001 has `GEOCODE` `11001`, and so does
-state legislative district 001. Both pass. It also leaves out what is there: summary level 155 is
-state, then place, then county, so a record that really is in the county fails the same test.
+It lets in what is not there. `GEOCODE` is laid out differently for each of the 62 summary
+levels in the 2020 Wyoming file, and several of them put three digits exactly where a county
+FIPS would sit. In the real 2020 file for the District of Columbia, county 001 has `GEOCODE`
+`11001`, and so does state legislative district 001. Both pass. It also leaves out what is
+there: summary level 155 is state, then place, then county, so a record that really is in the
+county fails the same test.
 
 Then the counting problem rides along behind it. Every level in the file covers the same people:
 the county, its county subdivisions, its tracts, its block groups, its voting districts, its
@@ -25,7 +26,7 @@ population is **689,545**. Nothing errors. Nothing warns. The number is off by e
 still looks like a population.
 
 A third trap is inside the race table. `P0010002` is not a race. It is "population of one race", a
-subtotal of the six single-race columns above it, and adding it to them counts most of the county
+subtotal of the six single-race columns after it, and adding it to them counts most of the county
 twice. Beside it, table P2 is Hispanic or Latino **origin**, a separate question asked of everyone
 P1 already counted. For the District of Columbia the seven real P1 columns add to 689,545 exactly,
 while P1 total plus P2 Hispanic comes to 767,197 for a population of 689,545.
@@ -82,6 +83,8 @@ PASS  and the refusal names the flag that would override it
 PASS  --allow-unreconciled writes it anyway
 PASS  and still exits 1, because the extract is still wrong  <-- pinned defect
 ...
+PASS  a damaged LZMA member exits 2 with one line, not an LZMAError traceback that exits 1  <-- pinned defect
+...
 PASS  --ap is refused by argparse with exit 2 and writes nothing, rather than being read as --apply  <-- pinned defect
 PASS  and so are --app and --appl
 PASS  and --allow, which was --allow-unreconciled
@@ -93,10 +96,10 @@ PASS  a write to a closed pipe exits 2 as well, even on a run that would have ex
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 ...
 --------------------------------------------------------------------
-274 assertions, 0 failed
+275 assertions, 0 failed
 ```
 
-The block is abridged, and `...` marks each place where lines are left out. The same 274
+The block is abridged, and `...` marks each place where lines are left out. The same 275
 assertions pass on Windows with Python 3.13, 3.12 and 3.9, and on Ubuntu with Python 3.12 and 3.9.
 Branch coverage of `pl94.py` under `--self-test` is 100 percent.
 
@@ -181,8 +184,8 @@ in plain sight.
    asked. Two of any of them is refused rather than resolved by taking the first, because a zip
    re-made on a Mac carries a `__MACOSX` copy of every file. The 2020 segment 3, group quarters,
    is not read. A member that is damaged, encrypted or compressed with a method `zipfile` cannot
-   read, such as Deflate64, exits 2 with one line. It does not escape as a traceback that exits 1,
-   the code for "the numbers disagreed".
+   read, such as Deflate64, exits 2 with one line. So does a damaged LZMA member. It does not
+   escape as a traceback that exits 1, the code for "the numbers disagreed".
 7. **That it is one file.** `LOGRECNO` is the key the geoheader and the segments are joined on,
    and the Census Bureau numbers it once per file. A repeat means two files were concatenated.
    Left alone, the second record replaces the first: a block leaves the extract while the row
@@ -379,8 +382,9 @@ cannot also report success.
   `--year`.
 - **2010 keys exist for a subset of the GEOID construction note**, plus 040 and 050. pl94 does
   not implement the note's rules for the Alaska Native Regional Corporation level 230, the
-  American Indian area levels 281, 283 and 286, or its dissolve rule for 280. In the real 2010 New Mexico and Wyoming files every record at those
-  levels has a blank `COUNTY`, so no county extract can reach them. Summary level 155 (place
+  American Indian area levels 281, 283 and 286, or its dissolve rule for 280. In the real 2010
+  New Mexico and Wyoming files every record at levels 280, 281, 283 and 286 has a blank `COUNTY`,
+  so no county extract can reach them. Neither file has a level 230 record. Summary level 155 (place
   within county) is not in the note and has no rule either, so a 2010 extract of it is refused.
   Many other in-county levels have no rule. The real Wyoming 2010 run for county 021 has 23
   besides 155: 510 to 512, 521, 612, 613, 622, 623, 630, 631, 635, 636, 640, 641, 701, 706 to
@@ -432,8 +436,13 @@ cannot also report success.
   and underscores. A count written as `+123`, `-5` or `1_000` is read as a number. No real file
   tested contains these.
 - pl94 does not check that the geoheader and the segments come from the same state. It joins them
-  on `LOGRECNO` alone. A Wyoming geoheader re-zipped with District of Columbia segments exits 1
-  because its rows do not join, and the refusal does not say that the files do not match.
+  on `LOGRECNO` alone. A Wyoming 2020 geoheader re-zipped with District of Columbia segments
+  exits 1. Some of its rows do not join, and others join to the District's rows, so the county control
+  record shows a District population of 4,676. The refusal does not say that the files do not
+  match.
+- pl94 finds each segment by its member name only. A segment 2 file stored under the segment 1
+  name is read as population and can reconcile: in Wyoming 2020, county 021 then exits 0 with a
+  total of 77,134, the voting-age population, not 100,512.
 - Two blocks whose P1 rows are swapped still reconcile with exit 0. The county totals and each
   row's own sums do not change, so the county record cannot detect a row in the wrong block.
 - A zero-byte geoheader or an empty segment 2 member is refused with exit 1, "the numbers
@@ -446,7 +455,12 @@ cannot also report success.
   line, `wrote ...`, is lost, the CSV is already written and the run still exits 2. A reader that exits
   after it has read the whole report, such as `head -1`, does not count: the report was
   delivered, and the run exits on its verdict. `--help` into a closed pipe is not covered and can
-  still exit 120.
+  still exit 120. An `--apply` run piped into `head -1` writes the CSV and then exits 2, because
+  the `wrote ...` line hits the closed pipe.
+- A run started with stdout closed, rather than redirected, stops with a traceback and exits 1.
+  On Linux that is `>&-`. No CSV is written, even with `--apply`.
+- On Windows, a report redirected to a file has CRLF line endings, so a byte comparison with a
+  Linux run differs in line endings only.
 - On Windows, a `--pl` file name with a character outside the console code page, such as a
   Chinese character, crashes the report with a `UnicodeEncodeError` when stdout goes to a file.
   The run exits 1 and writes no CSV, even with `--apply`, because the report prints before the
@@ -454,6 +468,25 @@ cannot also report success.
   crashes, and the run exits 1.
 - pl94 uses `os.path.samefile` to stop `--out` from naming the `--pl` zip. On a file system where
   that call is unreliable, `--out` could still overwrite the input.
+- A geoheader that ends with a DOS end-of-file byte, 0x1A, is refused with exit 2 as a malformed
+  one-field record in 2020, or a one-character record in 2010.
+- An area field that holds a Latin-1 superscript digit, such as `1` followed by superscript two,
+  exits 2, but the error quotes only the value and does not name the field.
+- If `--county` is given twice, argparse keeps the last value without a warning.
+  `--county 999 --county 001` extracts county 001.
+- Each run reads the whole state zip again. Wyoming takes about 1 second per county on the test
+  workstation, and the time grows with the size of the state, so a sweep of every county in a
+  large state is slow.
+- The 2010 block keys were compared with TIGER/Line `GEOID10` for one county only, Laramie
+  County. The composed keys for levels 060, 140, 150 and 700 are checked against the construction
+  note and the county totals, not against a TIGER file.
+- The Census API behaviour in "Why the obvious version is wrong" was observed in October 2026.
+  The API can change.
+- The self-test needs a temporary directory that supports hard links. Without them it stops with
+  exit 2 and wrongly says that it could not write the report to stdout. It also needs a Python
+  built with the `lzma` module, which a few builds leave out. pl94 itself runs without it.
+- Branch coverage was measured on Windows with Python 3.13 only. The Linux host has no
+  `coverage` module, so the figure was not measured there or on Python 3.9.
 - The tool makes no network calls, so there is no network path to test against a stub server.
 - The whole county's admitted records are held in memory. A large county is a few hundred thousand
   small tuples, which is fine; the whole state at once would not be.

@@ -34,7 +34,8 @@ extract, and that needs --apply.
 
 Exit codes: 0 the extract reconciles, 1 it does not (the CSV is written only
 with --allow-unreconciled), 2 the file could not be read, the CSV could not
-be written or argparse rejected an argument, 64 usage error found by pl94.
+be written, the report could not be written to stdout or argparse rejected
+an argument, 64 usage error found by pl94.
 """
 
 from __future__ import print_function
@@ -46,6 +47,10 @@ import os
 import sys
 import zipfile
 import zlib
+
+# zipfile imports lzma itself and keeps None when the build lacks it. zlib.error
+# stands in then: it is caught anyway, and no LZMA member can be read at all.
+LZMA_ERROR = getattr(zipfile.lzma, "LZMAError", zlib.error)
 
 # =============================================================================
 # CONFIGURATION. Deliberately not constants at the call site.
@@ -94,8 +99,9 @@ GEO2010 = {
 # So the 2010 key is COMPOSED, per summary level, from the concatenations in
 # the Census Bureau's "GEOID Construction for Matching" note for the 2010 PL
 # file. 040 and 050 are not in that note and are the obvious two. This is a
-# SUBSET of the note: its rules for the American Indian area levels 230, 281,
-# 283 and 286, and its dissolve rule for 280, are not here. Those records
+# SUBSET of the note: its rules for the Alaska Native Regional Corporation
+# level 230 and the American Indian area levels 281, 283 and 286, and its
+# dissolve rule for 280, are not here. Those records
 # carry a blank COUNTY, so no county extract can reach them. A level that is
 # not here composes no key, and pl94 refuses to extract it rather than invent
 # one. The 2020 GEOCODE for each level here is the same string.
@@ -337,7 +343,7 @@ def in_county(geo, county_fips):
     Every record that belongs to a county carries its FIPS here, and every
     record that does not leaves the field empty. No summary level list to
     keep up to date, and no guessing at where a county sits inside a GEOCODE
-    that is laid out differently for each of the forty-odd levels in the file.
+    that is laid out differently for each of the 40 to 66 levels in a file.
     """
     return bool(county_fips) and geo.county == county_fips
 
@@ -1914,6 +1920,24 @@ def self_test():
           "a Deflate64 member, which zipfile cannot read, exits 2  <-- "
           "pinned defect")
 
+    lzma_zip = os.path.join(tmp, "lzma.zip")
+    with zipfile.ZipFile(lzma_zip, "w", zipfile.ZIP_LZMA) as zf:
+        for member, rows in (("zzgeo2020.pl", geo_rows),
+                             ("zz000012020.pl", seg_rows),
+                             ("zz000022020.pl", seg2_rows)):
+            zf.writestr(member, "\r\n".join(rows).encode("latin-1"))
+    with open(lzma_zip, "rb") as fh:
+        data = bytearray(fh.read())
+    # After the 30 byte header, the name and the 9 byte LZMA properties, the
+    # range coder's first byte must be 0. 0xFF is corrupt input to lzma.
+    data[30 + data[26] + 256 * data[27] + data[28] + 256 * data[29] + 9] = 0xFF
+    with open(lzma_zip, "wb") as fh:
+        fh.write(bytes(data))
+    code, out, err = run_cli(["--pl", lzma_zip, "--county", "045"])
+    check(code == 2 and "Corrupt input data" in err and "Traceback" not in err,
+          "a damaged LZMA member exits 2 with one line, not an LZMAError "
+          "traceback that exits 1  <-- pinned defect")
+
     victim = os.path.join(tmp, "victim.zip")
     shutil.copyfile(good_zip, victim)
     with open(victim, "rb") as fh:
@@ -2348,12 +2372,12 @@ def _run(args):
     try:
         report = read_pl(args.pl, args.county, args.sumlev, args.year)
     except (IOError, OSError, ValueError, zipfile.BadZipFile, zlib.error,
-            EOFError, RuntimeError) as exc:
-        # zlib.error is a damaged member, RuntimeError an encrypted one, and
-        # NotImplementedError (a RuntimeError) a compression method zipfile
-        # cannot read, such as Deflate64. None is an OSError, and each one
-        # left alone is a traceback that exits 1, the code for "the numbers
-        # disagreed".
+            LZMA_ERROR, EOFError, RuntimeError) as exc:
+        # zlib.error and LZMA_ERROR are a damaged member, RuntimeError an
+        # encrypted one, and NotImplementedError (a RuntimeError) a
+        # compression method zipfile cannot read, such as Deflate64. None is
+        # an OSError, and each one left alone is a traceback that exits 1,
+        # the code for "the numbers disagreed".
         print("error: %s" % exc, file=sys.stderr)
         return 2
 
