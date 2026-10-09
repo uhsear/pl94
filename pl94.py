@@ -587,6 +587,10 @@ def describe(report, source):
     for level in report.by_level:
         if not level.in_county:
             note = "NO, the %s prefix let it in" % key
+        elif report.year == "2010" and level.sumlev not in GEOID2010:
+            # No key, so a prefix "miss" here would be pl94's missing rule
+            # speaking, not a measurement of the prefix filter.
+            note = "yes, and pl94 has no 2010 GEOID rule for it"
         elif level.prefix_records < level.records:
             note = ("yes, and the %s prefix misses %d of them"
                     % (key, level.records - level.prefix_records))
@@ -860,6 +864,10 @@ def self_test():
     raises(lambda: parse_seg2_line("|".join(broken)),
            "a segment 2 record with a housing count that is not a number "
            "raises")
+    broken = seg2_rows[4].split("|")
+    broken[149] = ""
+    raises(lambda: parse_seg2_line("|".join(broken)),
+           "and so does an empty H1 total, rather than reading it as zero")
     check(parse_seg2_line(seg2_rows[4].replace("|", ","), ",")[1] == homes,
           "and the same record comma delimited reads the same, given the "
           "comma")
@@ -1021,6 +1029,14 @@ def self_test():
     raises(lambda: parse_geo_line_2010(wy_geo_050[:499]),
            "a 2010 record one character short raises, because the layout is "
            "exact")
+    # A name re-encoded as UTF-8 makes the record one BYTE longer. Read as
+    # latin-1 that is 501 characters; read as UTF-8 it would be 500 again.
+    utf8_record = (wy_geo_050[:226] + u"\xf1" + wy_geo_050[227:]).encode(
+        "utf-8")
+    raises(lambda: parse_geo_line_2010(_line(utf8_record)),
+           "and a 2010 record re-encoded as UTF-8, with n with a tilde in "
+           "two bytes, reads as 501 latin-1 characters and raises too  "
+           "<-- pinned defect")
     raises(lambda: parse_geo_line_2010(wy_geo_050[:-1] + "|"),
            "and so does a record of exactly 500 characters that carries a "
            "pipe, which is a 2020 record of unlucky length  <-- pinned defect")
@@ -1063,9 +1079,9 @@ def self_test():
              "700": "99045ABC123", "750": "990450001001001",
              "950": "9956789", "960": "9967890", "970": "9978901"}
     check(dict((lv, composed(lv)) for lv in rules) == rules,
-          "all sixteen 2010 GEOID rules compose the concatenation the "
-          "construction note prints, out of full-width fields at the "
-          "published positions  <-- pinned defect")
+          "the fourteen 2010 GEOID rules the construction note prints, "
+          "plus pl94's own 040 and 050, compose their concatenations out of "
+          "full-width fields at the published positions  <-- pinned defect")
     check(sorted(GEOID2010) == sorted(rules),
           "and those sixteen are every rule pl94 has, so none is untested")
     wide = parse_geo_line_2010("".join(full))
@@ -1594,6 +1610,11 @@ def self_test():
               for l in lines_2010),
           "and names the composed GEOID, not a GEOCODE field 2010 does not "
           "have")
+    check(any(l.startswith("  155")
+              and l.endswith("yes, and pl94 has no 2010 GEOID rule for it")
+              for l in lines_2010),
+          "a 2010 level with no GEOID rule is marked as such, not as one the "
+          "prefix misses, because it has no key to test  <-- pinned defect")
 
     # ---- real files on disk. Everything below writes into one temporary
     # directory and deletes it again. No network, no credentials.
@@ -1903,6 +1924,16 @@ def self_test():
                               "--out", dest, "--apply"])
     check(code == 2 and "could not write" in err,
           "and a csv.Error while the extract is written exits 2 as well")
+    # 0x81 is a byte cp1252 cannot encode. Written in the locale's encoding,
+    # it raised on Windows after the header was out, and left a partial CSV.
+    odd_csv = os.path.join(tmp, "odd.csv")
+    first = report.extract_rows[0]
+    write_csv(odd_csv, [(u"\x81" + first[0],) + first[1:]])
+    with open(odd_csv, "rb") as fh:
+        check(fh.read().splitlines()[1].startswith(b"\x81990450001001001,"),
+              "the extract is written as latin-1 on every platform, so a "
+              "byte the file gave goes back out as that byte  <-- pinned "
+              "defect")
 
     # ---- usage errors
     check(run_cli([])[0] == 64, "no arguments at all is a usage error")
@@ -2100,7 +2131,9 @@ def read_pl(zip_path, county_fips, sumlev, year=DEFAULT_YEAR):
 
 def write_csv(path, rows):
     """Write the extract. newline='' or every row gains a blank line."""
-    with open(path, "w", newline="") as fh:
+    # latin-1 both ways: every value was decoded as latin-1, so each one
+    # encodes back to the bytes the file gave, on any platform.
+    with open(path, "w", newline="", encoding="latin-1") as fh:
         writer = csv.writer(fh)
         writer.writerow(CSV_FIELDS)
         for geoid, geo, counts, homes in rows:
