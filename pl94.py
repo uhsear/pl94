@@ -1306,6 +1306,14 @@ def self_test():
           and any("do not add to P1_001" in r for r in corrupt.reasons),
           "and it is REFUSED anyway, because the row disagrees with itself  "
           "<-- pinned defect")
+    bloated = scan(geo_rows,
+                   without_seg("0000005")
+                   + [seg_line("0000005", 5, 2, 1, 1, 0, 0, 1, 3, total=9)],
+                   seg2_rows, "045")
+    check(not bloated.reconciled
+          and bloated.bad_race == ["990450001001003"],
+          "and so is a block whose race columns add to 10, MORE than its "
+          "P1_001 of 9")
 
     place = scan(geo_rows, seg_rows, seg2_rows, "045", "160")
     check(not place.reconciled
@@ -1402,10 +1410,18 @@ def self_test():
           "a block whose occupied and vacant add to 3 under a total of 4 is "
           "REFUSED even though the county total still matches  <-- pinned "
           "defect")
+    crowded = scan(geo_rows, seg_rows,
+                   without_seg2("0000005") + [seg2_line("0000005", 3, 1,
+                                                        total=3)],
+                   "045")
+    check(not crowded.reconciled
+          and crowded.bad_housing == ["990450001001003"],
+          "and so is one whose occupied and vacant add to 4, MORE than its "
+          "total of 3")
 
     # ---- area refusals. A block with no people and no homes moves
     # neither P1 nor H1, so a filter that drops empty blocks reconciles on
-    # both. Only the land area sees it go.
+    # both. Only the area checks see it go.
     empty_block = geo_line("750", "0000014", "990450001001004", "045", "500")
     roomy = scan(geo_rows + [empty_block],
                  seg_rows + [seg_line("0000014", 0, 0, 0, 0, 0, 0, 0, 0)],
@@ -1682,6 +1698,12 @@ def self_test():
     check(code == 0 and not os.path.exists(dest),
           "--out without --apply writes nothing  <-- pinned defect")
     check("was not written" in out, "and says the file was not written")
+    code, out, err = run_cli(["--pl", short_zip, "--county", "045",
+                              "--out", os.path.join(tmp, "never.csv")])
+    check(code == 1 and "--apply would refuse it too" in out
+          and "Re-run with --apply" not in out,
+          "a check-only run of an extract that does not reconcile does not "
+          "tell the operator to re-run with --apply  <-- pinned defect")
 
     code, out, err = run_cli(["--pl", good_zip, "--county", "045",
                               "--out", dest, "--apply"])
@@ -1786,6 +1808,15 @@ def self_test():
     code, out, err = run_cli(["--pl", two_seg2, "--county", "045"])
     check(code == 2 and "look like the 2020 segment 2" in err,
           "and so are two files that both look like segment 2")
+    shouty = os.path.join(tmp, "shouty.zip")
+    with zipfile.ZipFile(shouty, "w") as zf:
+        for member, rows in (("ZZGEO2020.PL", geo_rows),
+                             ("ZZ000012020.PL", seg_rows),
+                             ("ZZ000022020.PL", seg2_rows)):
+            zf.writestr(member, "\r\n".join(rows).encode("latin-1"))
+    code, out, err = run_cli(["--pl", shouty, "--county", "045"])
+    check(code == 0,
+          "member names in upper case, such as ZZGEO2020.PL, are matched")
 
     truncated = make_zip("trunc.zip", geo_rows,
                          seg_rows[:-1] + ["|".join(["0"] * 100)],
@@ -1894,6 +1925,14 @@ def self_test():
               and "destroy the input" in err,
               "--out naming the --pl zip itself is a usage error, and the zip "
               "is left byte for byte as it was  <-- pinned defect")
+    alias = os.path.join(tmp, "alias.zip")
+    os.link(victim, alias)
+    code, out, err = run_cli(["--pl", victim, "--county", "045",
+                              "--out", alias, "--apply"])
+    with open(victim, "rb") as fh:
+        check(code == 64 and fh.read() == victim_bytes,
+              "and so is an --out that names the same file by another path, "
+              "here a hard link, which a comparison of path strings misses")
 
     code, out, err = run_cli(["--pl", good_zip, "--county", "045",
                               "--out", tmp, "--apply"])
@@ -1992,6 +2031,64 @@ def self_test():
               "without --pl")
     finally:
         sys.argv = argv_before
+
+    # ---- a report nobody can read. A report this size sits in the stdout
+    # buffer until the interpreter exits, and a flush that fails THEN exits
+    # 120, or 0 on some hosts, whatever the verdict was.
+    class FullDisk(io.StringIO):
+        def flush(self):
+            raise OSError(28, "No space left on device")
+
+    class LateFull(io.StringIO):
+        flushes = 0
+
+        def flush(self):
+            LateFull.flushes += 1
+            if LateFull.flushes > 1:
+                raise OSError(28, "No space left on device")
+
+    class LostPipe(io.StringIO):
+        def write(self, text):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    class LostPipeFd(LostPipe):
+        def fileno(self):
+            return spare
+
+    def lost_run(stream, argv):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(stream), \
+                contextlib.redirect_stderr(err):
+            code = main(argv)
+        return code, err.getvalue()
+
+    code, err = lost_run(FullDisk(), ["--pl", good_zip, "--county", "045"])
+    check(code == 2 and "could not write the report to stdout" in err,
+          "a reconciled run whose report cannot be flushed exits 2, not 0  "
+          "<-- pinned defect")
+    lost_dest = os.path.join(tmp, "lost.csv")
+    code, err = lost_run(FullDisk(), ["--pl", good_zip, "--county", "045",
+                                      "--out", lost_dest, "--apply"])
+    check(code == 2 and not os.path.exists(lost_dest),
+          "and its CSV is not written, because the report is flushed first")
+    late_dest = os.path.join(tmp, "late.csv")
+    code, err = lost_run(LateFull(), ["--pl", good_zip, "--county", "045",
+                                      "--out", late_dest, "--apply"])
+    check(code == 2 and os.path.exists(late_dest),
+          "a run that loses only its last line, after the CSV is written, "
+          "still exits 2, and the CSV stays where it was written")
+    code, err = lost_run(LostPipe(), ["--pl", short_zip, "--county", "045"])
+    check(code == 2 and "Broken pipe" in err,
+          "a write to a closed pipe exits 2 as well, even on a run that "
+          "would have exited 1")
+    spare_path = os.path.join(tmp, "spare.txt")
+    spare = os.open(spare_path, os.O_WRONLY | os.O_CREAT)
+    code, err = lost_run(LostPipeFd(), ["--pl", good_zip, "--county", "045"])
+    os.write(spare, b"late")
+    os.close(spare)
+    check(code == 2 and os.path.getsize(spare_path) == 0,
+          "and the dead descriptor is pointed at the null device, so the "
+          "flush at interpreter exit has nowhere to fail  <-- pinned defect")
 
     # ---- the command line itself
     args = _parse([])
@@ -2190,7 +2287,30 @@ def _parse(argv):
 
 def main(argv=None):
     args = _parse(sys.argv[1:] if argv is None else argv)
+    try:
+        code = _run(args)
+        sys.stdout.flush()
+    except OSError as exc:
+        # stdout is gone: a reader that exited, or a full disk. Left alone,
+        # a report small enough to sit in the buffer fails only at
+        # interpreter exit, which exits 120, or 0 on some hosts, whatever
+        # the verdict. Neither code says the report was lost.
+        print("error: could not write the report to stdout: %s" % exc,
+              file=sys.stderr)
+        try:
+            # Point the descriptor at the null device, so the interpreter's
+            # own flush at exit has somewhere to put what is still buffered.
+            target = sys.stdout.fileno()
+            null = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(null, target)
+            os.close(null)
+        except (OSError, ValueError):
+            pass    # a stdout with no descriptor, such as a StringIO
+        return 2
+    return code
 
+
+def _run(args):
     if args.self_test:
         return self_test()
 
@@ -2239,12 +2359,19 @@ def main(argv=None):
 
     for line in describe(report, os.path.basename(args.pl)):
         print(line)
+    # Before the CSV, so a report nobody can read also stops the write.
+    sys.stdout.flush()
 
+    refused = not report.reconciled and not args.allow_unreconciled
     if args.out:
-        if not args.apply:
+        if not args.apply and refused:
+            print("\nCheck only. %s was not written, and --apply would "
+                  "refuse it too, because the extract does not reconcile."
+                  % args.out)
+        elif not args.apply:
             print("\nCheck only. %s was not written. Re-run with --apply."
                   % args.out)
-        elif not report.reconciled and not args.allow_unreconciled:
+        elif refused:
             print("\nRefused. %s was NOT written, because the extract does "
                   "not reconcile to the county record in the same file.\n"
                   "Pass --allow-unreconciled if you need the rows anyway."

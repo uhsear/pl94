@@ -86,13 +86,17 @@ PASS  --ap is refused by argparse with exit 2 and writes nothing, rather than be
 PASS  and so are --app and --appl
 PASS  and --allow, which was --allow-unreconciled
 ...
+PASS  a reconciled run whose report cannot be flushed exits 2, not 0  <-- pinned defect
+PASS  and its CSV is not written, because the report is flushed first
+PASS  a write to a closed pipe exits 2 as well, even on a run that would have exited 1
+...
 PASS  the harness records a false check, a missing exception and a wrong exception as three failures, so a broken tool turns this self-test red  <-- pinned defect
 ...
 --------------------------------------------------------------------
-264 assertions, 0 failed
+274 assertions, 0 failed
 ```
 
-The block is abridged, and `...` marks each place where lines are left out. The same 264
+The block is abridged, and `...` marks each place where lines are left out. The same 274
 assertions pass on Windows with Python 3.13, 3.12 and 3.9, and on Ubuntu with Python 3.12 and 3.9.
 Branch coverage of `pl94.py` under `--self-test` is 100 percent.
 
@@ -165,7 +169,7 @@ in plain sight.
    county record's `P0010001` population, its `H0010001` housing units, its `AREALAND` and its
    `AREAWATR`. Off by anything on any of the four, and the CSV is not written. The areas catch
    what the counts cannot: a block with no people and no homes moves neither total, so a filter
-   that drops empty blocks reconciles on both. Only the land area sees those blocks go.
+   that drops empty blocks reconciles on both. Only the area checks see those blocks go.
 4. **Every extracted record against itself.** The seven P1 race columns must add to `P0010001`,
    and H1 occupied plus vacant must add to the housing total, on every row. One row that disagrees
    with itself refuses the whole extract, even when the county totals still look right.
@@ -297,7 +301,8 @@ character late therefore fails the self-test.
 The self-test pins the layout with four real 2010 Wyoming records: the county's geoheader record,
 a senate district's geoheader record, and the county's segment 1 and segment 2 rows. Two of them are 500
 characters, mostly spaces. The self-test writes them as runs of text and runs of spaces, and it
-checks each one against the SHA-1 of the published line.
+checks those two geoheader records against the SHA-1 of the published lines. The two segment rows
+are written out in full and have no hash.
 
 ## Exit codes
 
@@ -305,7 +310,7 @@ checks each one against the SHA-1 of the published line.
 |---|---|
 | 0 | The extract reconciles to the county record in the same file. |
 | 1 | It does not. The reasons are printed, and the CSV is not written unless `--allow-unreconciled` was passed. A failed `--self-test` also exits 1. |
-| 2 | The file could not be read, or the CSV could not be written. A damaged, encrypted or Deflate64 zip member is an unreadable file. argparse also exits 2 for a flag it does not know, such as `--ap`. |
+| 2 | The file could not be read, the CSV could not be written, or the report could not be written to stdout. A damaged, encrypted or Deflate64 zip member is an unreadable file. argparse also exits 2 for a flag it does not know, such as `--ap`. |
 | 64 | Usage error found by pl94: a missing `--pl` or `--county`, a malformed `--county`, `--sumlev` or `--year`, `--apply` without `--out`, or an `--out` that is the `--pl` zip itself. `--county` and `--sumlev` must be three ASCII digits. |
 
 Exit 1 and exit 2 are kept apart on purpose. A scheduled job reads 1 as "the numbers disagreed",
@@ -328,7 +333,7 @@ geoid,arealand,areawatr,total,white,black,aian,asian,nhpi,other,two_or_more,hisp
 560210002004011,110550,0,282,218,16,8,0,0,13,27,52,137,125,12
 ```
 
-Eight of those columns add up as population. `total` is `P0010001`; `white` through
+The seven race columns add up to `total`. `total` is `P0010001`, and `white` through
 `two_or_more` are the seven columns that sum to it. `hispanic_any_race` is named that way because
 it overlaps every one of them, and `P0010002` is not written at all. `housing_units` is
 `H0010001`, and `occupied` plus `vacant` equals it on every row. `arealand` and `areawatr` are in
@@ -373,13 +378,14 @@ cannot also report success.
 - **2010 and 2020 only.** The 2000 PL file has another layout, and pl94 refuses any other
   `--year`.
 - **2010 keys exist for a subset of the GEOID construction note**, plus 040 and 050. pl94 does
-  not implement the note's rules for the American Indian area levels 230, 281, 283 and 286, or
-  its dissolve rule for 280. In the real 2010 New Mexico and Wyoming files every record at those
+  not implement the note's rules for the Alaska Native Regional Corporation level 230, the
+  American Indian area levels 281, 283 and 286, or its dissolve rule for 280. In the real 2010 New Mexico and Wyoming files every record at those
   levels has a blank `COUNTY`, so no county extract can reach them. Summary level 155 (place
   within county) is not in the note and has no rule either, so a 2010 extract of it is refused.
   Many other in-county levels have no rule. The real Wyoming 2010 run for county 021 has 23
   besides 155: 510 to 512, 521, 612, 613, 622, 623, 630, 631, 635, 636, 640, 641, 701, 706 to
-  710, 720, 730 and 740. New Mexico also carries 282, 285 and 288. The level table marks each one
+  710, 720, 730 and 740. Wyoming counties 013 and 017 also carry 282 and 285, county 017 also
+  carries 288, and New Mexico carries all three. The level table marks each one
   "pl94 has no 2010 GEOID rule for it". The "sum over every level the composed GEOID prefix
   admits" leaves them out, because they have no key to admit.
 - An extract of a 2010 level with no GEOID rule exits 1 even when its totals reconcile, because
@@ -397,8 +403,8 @@ cannot also report success.
 - Reconciling against the county record proves the extract is complete and not double counted. It
   does not prove the Census Bureau's own numbers, and it cannot see differential privacy noise,
   which the 2020 file carries by design at block level.
-- Exit 2 has three causes: an unreadable file, a CSV that could not be written, and an argument
-  that argparse rejects. argparse rejects an unknown flag such as `--ap`, and a flag with no
+- Exit 2 has four causes: an unreadable file, a CSV that could not be written, a report that
+  could not be written to stdout, and an argument that argparse rejects. argparse rejects an unknown flag such as `--ap`, and a flag with no
   value such as a bare `--county`, before pl94 sees the arguments. Read stderr to tell them apart.
 - A write that fails partway, such as a full disk, can leave a truncated CSV at `--out`, and pl94
   exits 2 to say so. It does not write to a temporary file and rename it.
@@ -413,13 +419,18 @@ cannot also report success.
   zip can send terminal escape codes that way too.
 - pl94 reads the files as latin-1 and checks the 2010 geoheader length in bytes. A 2010 geoheader
   re-encoded as UTF-8, with accented names, fails as malformed and exits 2 instead of being read.
+  A 2010 geoheader saved with a UTF-8 byte order mark also exits 2, because its first record is
+  503 characters. A 2020 geoheader with a byte order mark still reconciles, because the mark lands
+  in the unused `FILEID` field.
+- A 2010 geoheader whose trailing spaces an editor stripped exits 2 as malformed, for example a
+  381 character record in Wyoming. It is refused, not read.
   The CSV is written as latin-1 too, so each value goes out as the bytes the file gave.
 - A 2010 geoheader record with a pipe character anywhere in it, such as in a place name, is
   refused as malformed. No record in the 2010 geoheaders tested for Delaware, New Mexico, Puerto
   Rico, Rhode Island and Wyoming has one.
-- Counts are read with Python's `int()`, which accepts a leading `+`, surrounding spaces and
-  underscores. A count written as `+123` or `1_000` is read as a number. No real file tested
-  contains these.
+- Counts are read with Python's `int()`, which accepts a leading `+` or `-`, surrounding spaces
+  and underscores. A count written as `+123`, `-5` or `1_000` is read as a number. No real file
+  tested contains these.
 - pl94 does not check that the geoheader and the segments come from the same state. It joins them
   on `LOGRECNO` alone. A Wyoming geoheader re-zipped with District of Columbia segments exits 1
   because its rows do not join, and the refusal does not say that the files do not match.
@@ -429,8 +440,13 @@ cannot also report success.
   disagreed", not exit 2. The run is still not RECONCILED.
 - A county or summary level that the file does not carry, such as a mistyped `--county`, also
   exits 1, not 2 or 64. The refusal names what the file does not carry.
-- If stdout closes early, for example when the report is piped into a program that exits first,
-  Python raises `BrokenPipeError` and the run exits 1.
+- If the report cannot be written to stdout, for example because it is piped into a program that
+  exits without reading it or redirected to a full disk, the run exits 2 and says so on stderr.
+  pl94 writes the report before the CSV, so the CSV is not written either. If only the last
+  line, `wrote ...`, is lost, the CSV is already written and the run still exits 2. A reader that exits
+  after it has read the whole report, such as `head -1`, does not count: the report was
+  delivered, and the run exits on its verdict. `--help` into a closed pipe is not covered and can
+  still exit 120.
 - On Windows, a `--pl` file name with a character outside the console code page, such as a
   Chinese character, crashes the report with a `UnicodeEncodeError` when stdout goes to a file.
   The run exits 1 and writes no CSV, even with `--apply`, because the report prints before the
